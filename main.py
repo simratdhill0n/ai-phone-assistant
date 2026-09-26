@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Request
 import json
 import base64
 import audioop
-import wave
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Request
 
+from call_recorder import CallRecorder
 from config import settings
 
 app = FastAPI()
@@ -34,7 +34,7 @@ async def media_stream(websocket: WebSocket):
     await websocket.accept()
     print("Twilio Media Stream connected.")
 
-    wav_file = None
+    recorder = None
     call_sid = "unknown_call"
 
     try:
@@ -43,34 +43,27 @@ async def media_stream(websocket: WebSocket):
             message_text = await websocket.receive_text()
             packet = json.loads(message_text)
 
-            # 2. Extract the CallSid from the initialization 'start' packet
+            # 2. Start of the stream: create one recorder for the whole call
             if packet.get("event") == "start":
                 start_data = packet.get("start", {})
                 call_sid = start_data.get("callSid", "stream")
-                filename = f"audio_{call_sid}.wav"
-                
-                # Initialize WAV file: Twilio provides 8000Hz, 1 channel, mu-law
-                # We will convert it to 16-bit PCM (sample width = 2 bytes)
-                wav_file = wave.open(filename, "wb")
-                wav_file.setnchannels(1)      # Mono
-                wav_file.setsampwidth(2)      # 16-bit PCM
-                wav_file.setframerate(8000)   # 8000 Hz
-                print(f"Recording started. Saving to {filename}")
+                recorder = CallRecorder(call_sid)
+                print(f"Recording started. Saving to {recorder.path}")
 
             # 3. Process the streaming audio chunks
             elif packet.get("event") == "media":
                 media = packet.get("media", {})
                 payload = media.get("payload")
-                
-                if payload and wav_file:
+
+                if payload and recorder:
                     # Decode the base64 string back into raw mu-law bytes
                     mulaw_data = base64.b64decode(payload)
-                    
+
                     # Convert Twilio's 8-bit mu-law audio to standard 16-bit linear PCM
                     pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                    
-                    # Write the converted frames to the WAV file
-                    wav_file.writeframes(pcm_data)
+
+                    # Caller audio goes to the left channel
+                    recorder.add_caller_audio(pcm_data)
 
             # 4. Explicitly stop if Twilio sends the stop event
             elif packet.get("event") == "stop":
@@ -79,12 +72,12 @@ async def media_stream(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for CallSid: {call_sid}")
-        
+
     finally:
-        # Always properly seal the WAV file headers
-        if wav_file:
-            wav_file.close()
-            print(f"Audio file for {call_sid} successfully finalized.")
+        # Always finalize the recording, however the call ended
+        if recorder:
+            recorder.close()
+            print(f"Recording for {call_sid} saved to {recorder.path}")
 @app.post("/stream-status")
 async def stream_status_endpoint(request: Request):
     data = await request.form()
