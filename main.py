@@ -12,6 +12,7 @@ from call_recorder import CallRecorder
 from config import settings
 from db import init_db, save_call, utcnow
 from llm import Conversation
+from memory import build_caller_context
 from sms import notify_owner
 from stt import transcribe
 from tts import synthesize
@@ -121,11 +122,18 @@ async def media_stream(websocket: WebSocket):
                 caller_number = start_data.get("customParameters", {}).get("caller_number", "")
                 recorder = CallRecorder(call_sid)
                 vad = VoiceActivityDetector()
-                conversation = Conversation(GREETING, caller_number)
+
+                # Caller memory: look up this number's history (database = blocking)
+                greeting, caller_context = await asyncio.to_thread(
+                    build_caller_context, caller_number, GREETING
+                )
+                conversation = Conversation(greeting, caller_number, caller_context)
                 print(f"Call from {caller_number or 'unknown number'}")
+                if caller_context:
+                    print(f"Known caller.{caller_context}")
                 print(f"Recording started. Saving to {recorder.path}")
 
-                await say(websocket, stream_sid, GREETING, recorder)
+                await say(websocket, stream_sid, greeting, recorder)
 
             elif event == "media":
                 payload = packet.get("media", {}).get("payload")

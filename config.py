@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     owner_phone: str
     twilio_phone_number: str
     database_url: str
+    owner_timezone: str
 
 
 settings = Settings()

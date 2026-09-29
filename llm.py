@@ -66,8 +66,8 @@ client = AsyncClient()  # connects to the Ollama server at http://localhost:1143
 class Conversation:
     """One phone call's conversation: message history plus collected details."""
 
-    def __init__(self, greeting: str, caller_number: str = ""):
-        system_prompt = SYSTEM_PROMPT
+    def __init__(self, greeting: str, caller_number: str = "", caller_context: str = ""):
+        system_prompt = SYSTEM_PROMPT + caller_context
         if caller_number.startswith("+"):
             # A real number: let the assistant offer it instead of asking cold.
             system_prompt += (
