@@ -1,11 +1,14 @@
 import json
 import base64
 import audioop
+import asyncio
+import time
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Request
 
 from call_recorder import CallRecorder
 from config import settings
 from vad import VoiceActivityDetector
+from stt import transcribe
 
 app = FastAPI()
 
@@ -70,8 +73,11 @@ async def media_stream(websocket: WebSocket):
 
                     utterance = vad.process(pcm_data)
                     if utterance:
-                        seconds = len(utterance) / (8000 * 2)
-                        print(f"Caller finished speaking ({seconds:.1f}s of audio)")
+                        start = time.perf_counter()
+                        text = await asyncio.to_thread(transcribe, utterance)
+                        took = time.perf_counter() - start
+                        print(f"Caller said: {text}  (transcribed in {took:.2f}s)")
+                        
 
             # 4. Explicitly stop if Twilio sends the stop event
             elif packet.get("event") == "stop":
