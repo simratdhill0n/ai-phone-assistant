@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     assistant_name: str
     owner_phone: str
     twilio_phone_number: str
+    database_url: str
 
 
 settings = Settings()

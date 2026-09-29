@@ -83,6 +83,9 @@ class Conversation:
             {"role": "system", "content": system_prompt},
             {"role": "assistant", "content": greeting},
         ]
+        # Human-readable record of the call: (speaker, text) pairs.
+        # self.messages holds raw JSON for the model, this holds what was said.
+        self.transcript: list[tuple[str, str]] = [("assistant", greeting)]
         self.details = CallDetails()
         self._read_back_done = False  # have we read the details back to the caller?
 
@@ -92,6 +95,7 @@ class Conversation:
         Returns (reply_text, end_call).
         """
         self.messages.append({"role": "user", "content": caller_text})
+        self.transcript.append(("caller", caller_text))
 
         response = await client.chat(
             model=settings.ollama_model,
@@ -108,7 +112,7 @@ class Conversation:
         except ValidationError:
             # Rare with a schema, but never crash a live call over bad output
             print(f"LLM returned invalid output: {raw}")
-            return "Sorry, could you say that again?", False
+            return self._said("Sorry, could you say that again?"), False
 
         # Keep the model's JSON in the history, so on the next turn it sees
         # exactly what it already collected.
@@ -124,13 +128,18 @@ class Conversation:
                 f"Thanks {first_name}, I'll pass your message to {settings.owner_name}. "
                 "Have a great day, goodbye."
             )
-            return goodbye, True
+            return self._said(goodbye), True
 
         # If all details are now known, this reply is the read-back question.
         if self.details.is_complete():
             self._read_back_done = True
 
-        return turn.reply, False
+        return self._said(turn.reply), False
+
+    def _said(self, text: str) -> str:
+        """Record what the assistant is about to say, and pass it through."""
+        self.transcript.append(("assistant", text))
+        return text
 
     def _merge(self, turn: TurnOutput) -> None:
         """Update details with anything new. A null never erases a known value."""

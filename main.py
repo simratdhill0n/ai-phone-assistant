@@ -3,19 +3,29 @@ import audioop
 import base64
 import json
 import time
+from contextlib import asynccontextmanager
 from html import escape
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
 from call_recorder import CallRecorder
 from config import settings
+from db import init_db, save_call, utcnow
 from llm import Conversation
 from sms import notify_owner
 from stt import transcribe
 from tts import synthesize
 from vad import VoiceActivityDetector
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code before "yield" runs once at startup, code after it at shutdown
+    init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # 20 ms of phone audio: 160 samples * 2 bytes = 320 bytes of 16-bit PCM
 FRAME_BYTES_PCM = 320
@@ -95,6 +105,7 @@ async def media_stream(websocket: WebSocket):
     stream_sid = None
     caller_number = ""
     call_completed = False   # True once the caller confirmed their details
+    started_at = utcnow()
 
     try:
         while True:
@@ -170,6 +181,26 @@ async def media_stream(websocket: WebSocket):
         # Text the owner, whether the call completed or the caller hung up early
         if conversation:
             await notify_owner(conversation.details, caller_number, call_completed)
+
+            # Save the call. "missed" = they left without telling us anything.
+            details = conversation.details
+            if call_completed:
+                status = "completed"
+            elif details.name or details.reason:
+                status = "incomplete"
+            else:
+                status = "missed"
+
+            try:
+                await asyncio.to_thread(
+                    save_call,
+                    call_sid, caller_number, started_at, status, details,
+                    conversation.transcript, str(recorder.path) if recorder else None,
+                )
+                print(f"Call saved to database as '{status}'.")
+            except Exception as e:
+                # A database problem must never take the server down
+                print(f"Failed to save call: {e}")
 
 
 @app.post("/stream-status")

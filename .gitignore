@@ -221,3 +221,5 @@ __marimo__/
 # Recordings
 recordings/
 models
+
+*.db
