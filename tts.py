@@ -1,14 +1,46 @@
 """Text-to-speech using Piper, running locally on the CPU."""
 
 import audioop
+import re
 
 from piper import PiperVoice
 
-VOICE_PATH = "models/piper/en_US-hfc_female-medium.onnx"
+from config import settings
 
 # Loaded once at startup. Piper finds the matching .onnx.json config
 # automatically, as long as it sits next to the .onnx file.
-voice = PiperVoice.load(VOICE_PATH)
+voice = PiperVoice.load(settings.piper_voice_path)
+
+# Something that looks like a phone number: 7+ digits, optionally starting
+# with +, possibly broken up by spaces, dashes, dots or brackets.
+PHONE_PATTERN = re.compile(r"\+?\(?\d[\d\s().-]{5,}\d")
+
+
+def _say_digits(match: re.Match) -> str:
+    """Turn '+15485771772' into '5 4 8, 5 7 7, 1 7 7 2'."""
+    digits = re.sub(r"\D", "", match.group())   # keep only the digits
+
+    # North American numbers: drop the leading country code 1
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+
+    # Group 10-digit numbers like people say them: 3, 3, 4.
+    # The commas make the voice pause between groups.
+    if len(digits) == 10:
+        groups = [digits[:3], digits[3:6], digits[6:]]
+    else:
+        groups = [digits]
+
+    return ", ".join(" ".join(group) for group in groups)
+
+
+def normalize_for_speech(text: str) -> str:
+    """Rewrite text so it sounds right when spoken aloud.
+
+    TTS voices read '5485771772' as one huge number. This spells phone
+    numbers out digit by digit instead.
+    """
+    return PHONE_PATTERN.sub(_say_digits, text)
 
 
 def synthesize(text: str) -> bytes:
@@ -17,6 +49,8 @@ def synthesize(text: str) -> bytes:
     A normal (not async) function: it does heavy CPU work, so main.py runs
     it in a separate thread with asyncio.to_thread, like transcribe().
     """
+    text = normalize_for_speech(text)
+
     # 1. Generate speech. Piper outputs 16-bit PCM at the voice's own
     #    sample rate (22,050 Hz for most medium voices).
     #    The piper-tts API changed between versions, so support both.

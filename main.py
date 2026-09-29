@@ -3,6 +3,7 @@ import audioop
 import base64
 import json
 import time
+from html import escape
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
@@ -34,13 +35,24 @@ def read_root():
 
 
 @app.post("/voice")
-async def voice_endpoint():
+async def voice_endpoint(request: Request):
+    # Twilio's webhook includes the caller's number in the "From" field
+    form = await request.form()
+    caller_number = form.get("From", "")
+
+    # First dynamic value inside our XML: escape it, so characters like
+    # & or < can never break the TwiML.
+    caller_xml = escape(caller_number, quote=True)
+
     # No <Say> anymore: the assistant greets the caller in its own voice.
     # When our server closes the stream, the TwiML ends and Twilio hangs up.
+    # <Parameter> passes values into the stream's "start" event.
     twiml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
             <Connect>
-                <Stream statusCallback="https://{settings.public_host}/stream-status" url="wss://{settings.public_host}/media-stream" />
+                <Stream statusCallback="https://{settings.public_host}/stream-status" url="wss://{settings.public_host}/media-stream">
+                    <Parameter name="caller_number" value="{caller_xml}" />
+                </Stream>
             </Connect>
         </Response>
         """
@@ -91,9 +103,12 @@ async def media_stream(websocket: WebSocket):
                 start_data = packet.get("start", {})
                 call_sid = start_data.get("callSid", "stream")
                 stream_sid = start_data.get("streamSid")
+                # Values we passed with <Parameter> arrive in customParameters
+                caller_number = start_data.get("customParameters", {}).get("caller_number", "")
                 recorder = CallRecorder(call_sid)
                 vad = VoiceActivityDetector()
-                conversation = Conversation(GREETING)
+                conversation = Conversation(GREETING, caller_number)
+                print(f"Call from {caller_number or 'unknown number'}")
                 print(f"Recording started. Saving to {recorder.path}")
 
                 await say(websocket, stream_sid, GREETING, recorder)
