@@ -1,37 +1,64 @@
-import json
-import base64
-import audioop
 import asyncio
+import audioop
+import base64
+import json
 import time
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Request
+
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
 from call_recorder import CallRecorder
 from config import settings
-from vad import VoiceActivityDetector
 from stt import transcribe
+from vad import VoiceActivityDetector
 
 app = FastAPI()
+
+# 20 ms of phone audio: 8000 samples/s * 0.02 s = 160 samples.
+# In 16-bit PCM that's 160 * 2 = 320 bytes.
+FRAME_BYTES_PCM = 320
 
 
 @app.get("/")
 def read_root():
     return {"status": "ok"}
 
+
 @app.post("/voice")
 async def voice_endpoint():
-    # Build your raw TwiML string
     twiml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Say>Hello, this is Simrat's AI voice assistant.</Say>
+            <Say>Hello, this is Simrat's AI voice assistant. This call may be recorded.</Say>
             <Connect>
                 <Stream statusCallback="https://{settings.public_host}/stream-status" url="wss://{settings.public_host}/media-stream" />
             </Connect>
             <Say>Call ended.</Say>
         </Response>
         """
-    
-    # Return a custom Response with the application/xml media type
     return Response(content=twiml_content, media_type="application/xml")
+
+
+async def send_audio(websocket: WebSocket, stream_sid: str, pcm: bytes, recorder: CallRecorder):
+    """Send 8 kHz 16-bit PCM audio to the caller through Twilio.
+
+    This is the reverse of what we do with incoming audio:
+    incoming:  base64 -> mu-law -> PCM
+    outgoing:  PCM -> mu-law -> base64
+    """
+    # Put the same audio in the recording's right (assistant) channel
+    recorder.add_assistant_audio(pcm)
+
+    # Send in 20 ms chunks, the same size Twilio sends to us
+    for i in range(0, len(pcm), FRAME_BYTES_PCM):
+        chunk = pcm[i:i + FRAME_BYTES_PCM]
+        mulaw = audioop.lin2ulaw(chunk, 2)
+        payload = base64.b64encode(mulaw).decode("ascii")
+
+        await websocket.send_json({
+            "event": "media",
+            "streamSid": stream_sid,  # tells Twilio which stream this audio is for
+            "media": {"payload": payload},
+        })
+
 
 @app.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
@@ -41,46 +68,44 @@ async def media_stream(websocket: WebSocket):
     recorder = None
     vad = None
     call_sid = "unknown_call"
+    stream_sid = None
 
     try:
         while True:
-            # 1. Twilio sends data as JSON text strings
             message_text = await websocket.receive_text()
             packet = json.loads(message_text)
+            event = packet.get("event")
 
-            # 2. Start of the stream: create one recorder for the whole call
-            if packet.get("event") == "start":
+            if event == "start":
                 start_data = packet.get("start", {})
                 call_sid = start_data.get("callSid", "stream")
+                # We need streamSid to send audio back to this call
+                stream_sid = start_data.get("streamSid")
                 recorder = CallRecorder(call_sid)
                 vad = VoiceActivityDetector()
                 print(f"Recording started. Saving to {recorder.path}")
 
-            # 3. Process the streaming audio chunks
-            elif packet.get("event") == "media":
-                media = packet.get("media", {})
-                payload = media.get("payload")
+            elif event == "media":
+                payload = packet.get("media", {}).get("payload")
 
                 if payload and recorder:
-                    # Decode the base64 string back into raw mu-law bytes
                     mulaw_data = base64.b64decode(payload)
-
-                    # Convert Twilio's 8-bit mu-law audio to standard 16-bit linear PCM
                     pcm_data = audioop.ulaw2lin(mulaw_data, 2)
 
-                    # Caller audio goes to the left channel
                     recorder.add_caller_audio(pcm_data)
 
                     utterance = vad.process(pcm_data)
                     if utterance:
-                        start = time.perf_counter()
+                        started = time.perf_counter()
                         text = await asyncio.to_thread(transcribe, utterance)
-                        took = time.perf_counter() - start
+                        took = time.perf_counter() - started
                         print(f"Caller said: {text}  (transcribed in {took:.2f}s)")
-                        
 
-            # 4. Explicitly stop if Twilio sends the stop event
-            elif packet.get("event") == "stop":
+                        # Echo test: play the caller's own words back to them
+                        await send_audio(websocket, stream_sid, utterance, recorder)
+                        print("Echoed utterance back to caller.")
+
+            elif event == "stop":
                 print("Twilio sent stop event.")
                 break
 
@@ -88,10 +113,10 @@ async def media_stream(websocket: WebSocket):
         print(f"WebSocket disconnected for CallSid: {call_sid}")
 
     finally:
-        # Always finalize the recording, however the call ended
         if recorder:
             recorder.close()
             print(f"Recording for {call_sid} saved to {recorder.path}")
+
 
 @app.post("/stream-status")
 async def stream_status_endpoint(request: Request):
