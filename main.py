@@ -5,6 +5,7 @@ from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Request
 
 from call_recorder import CallRecorder
 from config import settings
+from vad import VoiceActivityDetector
 
 app = FastAPI()
 
@@ -35,6 +36,7 @@ async def media_stream(websocket: WebSocket):
     print("Twilio Media Stream connected.")
 
     recorder = None
+    vad = None
     call_sid = "unknown_call"
 
     try:
@@ -48,6 +50,7 @@ async def media_stream(websocket: WebSocket):
                 start_data = packet.get("start", {})
                 call_sid = start_data.get("callSid", "stream")
                 recorder = CallRecorder(call_sid)
+                vad = VoiceActivityDetector()
                 print(f"Recording started. Saving to {recorder.path}")
 
             # 3. Process the streaming audio chunks
@@ -65,6 +68,11 @@ async def media_stream(websocket: WebSocket):
                     # Caller audio goes to the left channel
                     recorder.add_caller_audio(pcm_data)
 
+                    utterance = vad.process(pcm_data)
+                    if utterance:
+                        seconds = len(utterance) / (8000 * 2)
+                        print(f"Caller finished speaking ({seconds:.1f}s of audio)")
+
             # 4. Explicitly stop if Twilio sends the stop event
             elif packet.get("event") == "stop":
                 print("Twilio sent stop event.")
@@ -78,6 +86,7 @@ async def media_stream(websocket: WebSocket):
         if recorder:
             recorder.close()
             print(f"Recording for {call_sid} saved to {recorder.path}")
+
 @app.post("/stream-status")
 async def stream_status_endpoint(request: Request):
     data = await request.form()
