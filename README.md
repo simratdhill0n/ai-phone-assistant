@@ -98,7 +98,41 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in your values (needed from Stage 2 onward).
+### Configure
+
+Copy `.env.example` to `.env.dev` and fill in your values:
+
+| Variable | What it is |
+|---|---|
+| `APP_ENV` | `dev` or `prod`. Selects which `.env.<APP_ENV>` file is loaded |
+| `PUBLIC_HOST` | Your public tunnel domain, without `https://` (e.g. `abc123.ngrok-free.dev`) |
+| `TWILIO_ACCOUNT_SID` | From the Twilio Console |
+| `TWILIO_AUTH_TOKEN` | From the Twilio Console. Keep this secret |
+| `WHISPER_MODEL` | Speech-to-text model, e.g. `base.en` |
+| `PIPER_VOICE_PATH` | Path to the Piper voice `.onnx` file (see below) |
+
+### Download models
+
+Speech recognition and text-to-speech run locally, so no AI API keys are needed.
+
+**Speech-to-text (faster-whisper):** downloads automatically from Hugging Face the first time the server starts, then is cached. Nothing to do.
+
+**Text-to-speech (Piper):** download a voice manually. Each voice needs **two files** with matching names: the model (`.onnx`) and its config (`.onnx.json`).
+
+1. Browse voices at [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices). You can listen to samples at [rhasspy.github.io/piper-samples](https://rhasspy.github.io/piper-samples).
+2. Medium quality is recommended. Phone audio is 8 kHz, so high quality voices add size and latency with no audible benefit.
+3. Save both files into `models/piper/`. The default voice is:
+
+```
+models/piper/en_US-hfc_female-medium.onnx
+models/piper/en_US-hfc_female-medium.onnx.json
+```
+
+> **Check the filenames.** Browsers sometimes rename downloads (adding a prefix, or `.txt` on Windows). Piper finds the config by adding `.json` to the model's name, so the names must match exactly. Verify with `ls models/piper` (or `dir models\piper` on Windows).
+
+To use a different voice, download its two files and set `PIPER_VOICE_PATH` to the `.onnx` file.
+
+The `models/` folder is git-ignored because the files are large.
 
 ### Run locally
 

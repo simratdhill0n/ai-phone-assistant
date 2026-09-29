@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     public_host: str
     twilio_account_sid: str
     twilio_auth_token: SecretStr
+    piper_voice_path: str
+    whisper_model: str
 
 
 settings = Settings()

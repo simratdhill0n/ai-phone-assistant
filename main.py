@@ -10,6 +10,7 @@ from call_recorder import CallRecorder
 from config import settings
 from stt import transcribe
 from vad import VoiceActivityDetector
+from tts import synthesize
 
 app = FastAPI()
 
@@ -101,9 +102,11 @@ async def media_stream(websocket: WebSocket):
                         took = time.perf_counter() - started
                         print(f"Caller said: {text}  (transcribed in {took:.2f}s)")
 
-                        # Echo test: play the caller's own words back to them
-                        await send_audio(websocket, stream_sid, utterance, recorder)
-                        print("Echoed utterance back to caller.")
+                        if text:
+                            reply = f"I heard you say: {text}"
+                            speech = await asyncio.to_thread(synthesize, reply)
+                            await send_audio(websocket, stream_sid, speech, recorder)
+                            print(f"Assistant said: {reply}")
 
             elif event == "stop":
                 print("Twilio sent stop event.")
