@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     twilio_auth_token: SecretStr
     piper_voice_path: str
     whisper_model: str
+    ollama_model: str
+    owner_name: str
+    assistant_name: str
 
 
 settings = Settings()
