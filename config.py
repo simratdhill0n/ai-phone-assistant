@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     ollama_model: str
     owner_name: str
     assistant_name: str
+    owner_phone: str
+    twilio_phone_number: str
 
 
 settings = Settings()

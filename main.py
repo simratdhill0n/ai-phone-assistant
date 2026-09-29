@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from call_recorder import CallRecorder
 from config import settings
 from llm import Conversation
+from sms import notify_owner
 from stt import transcribe
 from tts import synthesize
 from vad import VoiceActivityDetector
@@ -92,6 +93,8 @@ async def media_stream(websocket: WebSocket):
     conversation = None
     call_sid = "unknown_call"
     stream_sid = None
+    caller_number = ""
+    call_completed = False   # True once the caller confirmed their details
 
     try:
         while True:
@@ -144,6 +147,7 @@ async def media_stream(websocket: WebSocket):
                 print(f"  timing: stt {t1 - t0:.2f}s | llm {t2 - t1:.2f}s | tts+send {t3 - t2:.2f}s")
 
                 if end_call:
+                    call_completed = True
                     # Twilio plays our audio in real time, so wait for the
                     # goodbye to finish before hanging up.
                     await asyncio.sleep(duration + 0.5)
@@ -162,6 +166,10 @@ async def media_stream(websocket: WebSocket):
         if recorder:
             recorder.close()
             print(f"Recording for {call_sid} saved to {recorder.path}")
+
+        # Text the owner, whether the call completed or the caller hung up early
+        if conversation:
+            await notify_owner(conversation.details, caller_number, call_completed)
 
 
 @app.post("/stream-status")
