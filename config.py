@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     twilio_phone_number: str
     database_url: str
     owner_timezone: str
+    whisper_device: str
+    whisper_compute_type: str
 
 
 settings = Settings()

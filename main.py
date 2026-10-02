@@ -2,20 +2,23 @@ import asyncio
 import audioop
 import base64
 import json
+import re
 import time
 from contextlib import asynccontextmanager
 from html import escape
 
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
 from call_recorder import CallRecorder
 from config import settings
 from db import init_db, save_call, utcnow
-from llm import Conversation
+from llm import Conversation, warm_up
 from memory import build_caller_context
+from notes import handle_owner_sms
 from sms import notify_owner
-from stt import transcribe
+from stt import transcribe, warm_up_stt
 from tts import synthesize
+from twilio_security import verify_twilio
 from vad import VoiceActivityDetector
 
 
@@ -23,6 +26,13 @@ from vad import VoiceActivityDetector
 async def lifespan(app: FastAPI):
     # Code before "yield" runs once at startup, code after it at shutdown
     init_db()
+    await asyncio.to_thread(warm_up_stt)
+    print("Speech-to-text ready.")
+    try:
+        await warm_up()
+        print("LLM loaded and ready.")
+    except Exception as e:
+        print(f"Could not warm up the LLM (is Ollama running?): {e}")
     yield
 
 
@@ -46,7 +56,7 @@ def read_root():
     return {"status": "ok"}
 
 
-@app.post("/voice")
+@app.post("/voice", dependencies=[Depends(verify_twilio)])
 async def voice_endpoint(request: Request):
     # Twilio's webhook includes the caller's number in the "From" field
     form = await request.form()
@@ -105,8 +115,9 @@ async def media_stream(websocket: WebSocket):
     call_sid = "unknown_call"
     stream_sid = None
     caller_number = ""
-    call_completed = False   # True once the caller confirmed their details
     started_at = utcnow()
+    stt_hints = ""
+    speaking_until = 0.0   # time.monotonic() when the assistant's audio ends
 
     try:
         while True:
@@ -124,16 +135,23 @@ async def media_stream(websocket: WebSocket):
                 vad = VoiceActivityDetector()
 
                 # Caller memory: look up this number's history (database = blocking)
-                greeting, caller_context = await asyncio.to_thread(
+                greeting, caller_context, known_name = await asyncio.to_thread(
                     build_caller_context, caller_number, GREETING
                 )
                 conversation = Conversation(greeting, caller_number, caller_context)
+
+                # Names Whisper should expect on this call
+                hint_names = [settings.owner_name, settings.assistant_name]
+                if known_name:
+                    hint_names.append(known_name)
+                stt_hints = ", ".join(hint_names)
                 print(f"Call from {caller_number or 'unknown number'}")
                 if caller_context:
                     print(f"Known caller.{caller_context}")
                 print(f"Recording started. Saving to {recorder.path}")
 
-                await say(websocket, stream_sid, greeting, recorder)
+                duration = await say(websocket, stream_sid, greeting, recorder)
+                speaking_until = time.monotonic() + duration
 
             elif event == "media":
                 payload = packet.get("media", {}).get("payload")
@@ -148,11 +166,22 @@ async def media_stream(websocket: WebSocket):
                 if not utterance:
                     continue
 
+                # Did the caller start talking while the assistant was still
+                # speaking? (A "mhm" or "yeah" over our audio.) Without
+                # barge-in support yet, we ignore those.
+                spoke_at = time.monotonic() - len(utterance) / PCM_BYTES_PER_SECOND
+                if spoke_at < speaking_until:
+                    print("Ignored speech that overlapped the assistant.")
+                    continue
+
                 # 1. Speech to text
                 t0 = time.perf_counter()
-                text = await asyncio.to_thread(transcribe, utterance)
+                text = await asyncio.to_thread(transcribe, utterance, stt_hints)
                 t1 = time.perf_counter()
-                if not text:
+                # Whisper "hears" things in noise, like ". . ." or "Thank you."
+                # No letters or digits at all means nothing real was said.
+                if not re.search(r"[A-Za-z0-9]", text):
+                    print(f"Ignored non-speech transcript: {text!r}")
                     continue
                 print(f"Caller said: {text}")
 
@@ -162,11 +191,11 @@ async def media_stream(websocket: WebSocket):
 
                 # 3. Text to speech, sent to the caller
                 duration = await say(websocket, stream_sid, reply, recorder)
+                speaking_until = time.monotonic() + duration
                 t3 = time.perf_counter()
                 print(f"  timing: stt {t1 - t0:.2f}s | llm {t2 - t1:.2f}s | tts+send {t3 - t2:.2f}s")
 
                 if end_call:
-                    call_completed = True
                     # Twilio plays our audio in real time, so wait for the
                     # goodbye to finish before hanging up.
                     await asyncio.sleep(duration + 0.5)
@@ -188,6 +217,7 @@ async def media_stream(websocket: WebSocket):
 
         # Text the owner, whether the call completed or the caller hung up early
         if conversation:
+            call_completed = conversation.completed
             await notify_owner(conversation.details, caller_number, call_completed)
 
             # Save the call. "missed" = they left without telling us anything.
@@ -211,8 +241,29 @@ async def media_stream(websocket: WebSocket):
                 print(f"Failed to save call: {e}")
 
 
-@app.post("/stream-status")
+@app.post("/stream-status", dependencies=[Depends(verify_twilio)])
 async def stream_status_endpoint(request: Request):
     data = await request.form()
     print(f"Received stream status: {dict(data)}")
     return {"status": "ok"}
+
+
+@app.post("/sms", dependencies=[Depends(verify_twilio)])
+async def sms_endpoint(request: Request):
+    """Incoming text messages. Only the owner can leave notes."""
+    form = await request.form()
+    sender = form.get("From", "")
+    body = form.get("Body", "").strip()
+
+    if sender != settings.owner_phone:
+        # Anyone else texting this number gets no reply, and nothing is saved.
+        print(f"Ignored SMS from {sender}")
+        return Response(content="<Response/>", media_type="application/xml")
+
+    print(f"Note from owner: {body}")
+    reply = await handle_owner_sms(body)
+    print(f"Replied: {reply}")
+
+    # Replying is just TwiML again: <Message> sends an SMS back to the sender
+    twiml = f"<Response><Message>{escape(reply)}</Message></Response>"
+    return Response(content=twiml, media_type="application/xml")

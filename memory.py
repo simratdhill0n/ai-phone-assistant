@@ -39,19 +39,19 @@ def _describe_call(call: Call) -> str:
     return f"called {when}"
 
 
-def build_caller_context(phone: str, default_greeting: str) -> tuple[str, str]:
-    """Look up the caller. Returns (greeting, extra_system_prompt).
+def build_caller_context(phone: str, default_greeting: str) -> tuple[str, str, str | None]:
+    """Look up the caller. Returns (greeting, extra_system_prompt, known_name).
 
     Plain (not async) function: it queries the database, so main.py runs it
     with asyncio.to_thread.
     """
     if not phone.startswith("+"):
-        return default_greeting, ""        # hidden caller ID: nothing to look up
+        return default_greeting, "", None   # hidden caller ID: nothing to look up
 
     contact = get_contact(phone)
     calls = get_recent_calls(phone, limit=3)
     if contact is None and not calls:
-        return default_greeting, ""        # first-time caller
+        return default_greeting, "", None   # first-time caller
 
     greeting = default_greeting
     lines = ["\nCALLER HISTORY (from our records, linked to this phone number):"]
@@ -77,4 +77,5 @@ def build_caller_context(phone: str, default_greeting: str) -> tuple[str, str]:
         "- Still collect all details for THIS call, but don't ask for things they have just confirmed."
     )
 
-    return greeting, "\n".join(lines) + "\n"
+    known_name = contact.name if contact else None
+    return greeting, "\n".join(lines) + "\n", known_name

@@ -16,7 +16,7 @@ from array import array
 # Tuning values. Twilio frames are 20 ms each.
 THRESHOLD = 30      # RMS above this counts as speech
 START_FRAMES = 3    # 60 ms of speech to start an utterance
-END_FRAMES = 35     # 700 ms of silence to end an utterance
+END_FRAMES = 50     # 1 second of silence to end an utterance
 
 SILENT = "silent"
 SPEAKING = "speaking"

@@ -52,6 +52,15 @@ class TranscriptTurn(SQLModel, table=True):
     text: str
 
 
+class Note(SQLModel, table=True):
+    """A note the owner wrote about a contact, sent by SMS."""
+    id: int | None = Field(default=None, primary_key=True)
+    phone: str = Field(foreign_key="contact.phone", index=True)
+    text: str
+    visibility: str            # "private" (never said to caller) or "shareable"
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 # ---------- Setup ----------
 
 # check_same_thread=False: SQLite normally refuses to be used from more than
@@ -135,4 +144,35 @@ def get_recent_calls(phone: str, limit: int = 3) -> list[Call]:
             .order_by(Call.started_at.desc())
             .limit(limit)
         )
+        return list(session.exec(statement))
+
+
+def find_contacts_by_name(name: str) -> list[Contact]:
+    """Contacts whose name contains this text, ignoring case.
+    'ahmed' matches 'Ahmed Khan'."""
+    with Session(engine) as session:
+        statement = select(Contact).where(Contact.name.ilike(f"%{name}%"))
+        return list(session.exec(statement))
+
+
+def add_note(phone: str, text: str, visibility: str, name: str | None = None) -> Contact:
+    """Save a note for this number. Creates the contact if it's new."""
+    with Session(engine) as session:
+        contact = session.get(Contact, phone)
+        if contact is None:
+            contact = Contact(phone=phone)
+        if name and not contact.name:
+            contact.name = name
+        contact.updated_at = utcnow()
+        session.add(contact)
+        session.add(Note(phone=phone, text=text, visibility=visibility))
+        session.commit()
+        session.refresh(contact)   # reload so it's usable after the session closes
+        return contact
+
+
+def get_notes(phone: str) -> list[Note]:
+    """All notes about this number, oldest first."""
+    with Session(engine) as session:
+        statement = select(Note).where(Note.phone == phone).order_by(Note.created_at)
         return list(session.exec(statement))
