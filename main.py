@@ -17,7 +17,7 @@ from memory import build_caller_context
 from notes import handle_owner_sms
 from sms import notify_owner
 from stt import transcribe, warm_up_stt
-from tts import synthesize
+from tts import synthesize, warm_up_tts
 from twilio_security import verify_twilio
 from vad import VoiceActivityDetector
 
@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI):
     init_db()
     await asyncio.to_thread(warm_up_stt)
     print("Speech-to-text ready.")
+    await asyncio.to_thread(warm_up_tts)
+    print(f"Text-to-speech ready ({settings.tts_engine}).")
     try:
         await warm_up()
         print("LLM loaded and ready.")

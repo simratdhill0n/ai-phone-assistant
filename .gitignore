@@ -222,4 +222,20 @@ __marimo__/
 recordings/
 models
 
+# Environment and secrets
+.env*
+!.env.example
+
+# Virtual environment and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Call data (real people's voices and details)
+recordings/
+*.wav
 *.db
+
+# Large model files
+models/

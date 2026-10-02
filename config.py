@@ -12,24 +12,42 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=f".env.{APP_ENV}",
         env_file_encoding="utf-8",
-        extra="ignore",  # ignore unknown variables instead of erroring
+        extra="ignore",
     )
 
     app_env: Literal["dev", "prod"] = APP_ENV
+
+    # Server
     public_host: str
+
+    # Twilio
     twilio_account_sid: str
     twilio_auth_token: SecretStr
-    piper_voice_path: str
-    whisper_model: str
-    ollama_model: str
-    owner_name: str
-    assistant_name: str
-    owner_phone: str
     twilio_phone_number: str
-    database_url: str
-    owner_timezone: str
-    whisper_device: str
-    whisper_compute_type: str
+
+    # Owner and assistant
+    owner_name: str
+    owner_phone: str
+    owner_timezone: str = "America/Toronto"
+    assistant_name: str = "Nova"
+
+    # Database
+    database_url: str = "sqlite:///assistant.db"
+
+    # LLM
+    ollama_model: str = "qwen2.5:7b"
+
+    # Speech-to-text
+    whisper_model: str = "small.en"
+    whisper_device: str = "cuda"
+    whisper_compute_type: str = "float16"
+
+    # Text-to-speech
+    tts_engine: Literal["kokoro", "piper"] = "kokoro"
+    kokoro_voice: str = "af_heart"
+    kokoro_speed: float = 1.0
+    kokoro_device: str = "cuda"
+    piper_voice_path: str = ""
 
 
 settings = Settings()

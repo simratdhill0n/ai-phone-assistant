@@ -1,15 +1,19 @@
-"""Text-to-speech using Piper, running locally on the CPU."""
+"""Text-to-speech. Two engines, picked with the TTS_ENGINE setting:
+
+- kokoro: natural, human-like voice. Runs on the GPU if available.
+- piper:  older, more robotic, but very light on CPU. Kept as a fallback.
+
+Both return the same thing: 8 kHz, 16-bit PCM bytes, ready for send_audio().
+"""
 
 import audioop
 import re
 
-from piper import PiperVoice
+import numpy as np
 
 from config import settings
 
-# Loaded once at startup. Piper finds the matching .onnx.json config
-# automatically, as long as it sits next to the .onnx file.
-voice = PiperVoice.load(settings.piper_voice_path)
+# ---------- Text normalization (shared by both engines) ----------
 
 # Something that looks like a phone number: 7+ digits, optionally starting
 # with +, possibly broken up by spaces, dashes, dots or brackets.
@@ -43,24 +47,64 @@ def normalize_for_speech(text: str) -> str:
     return PHONE_PATTERN.sub(_say_digits, text)
 
 
+# ---------- Engines ----------
+# Only the chosen engine is imported and loaded, so you don't need the
+# other one installed.
+
+if settings.tts_engine == "kokoro":
+    from kokoro import KPipeline
+
+    # lang_code "a" = American English ("b" = British).
+    # Loaded once at startup. KOKORO_DEVICE picks "cuda" (GPU) or "cpu".
+    # On a GPU shared with a big LLM, CPU can leave the LLM more room.
+    _pipeline = KPipeline(lang_code="a", device=settings.kokoro_device)
+    _SOURCE_RATE = 24000   # Kokoro always outputs 24 kHz
+
+    def _generate(text: str) -> bytes:
+        chunks = []
+        # Kokoro splits long text into pieces and yields one audio chunk per
+        # piece: (graphemes, phonemes, audio). We only need the audio.
+        for _, _, audio in _pipeline(
+            text, voice=settings.kokoro_voice, speed=settings.kokoro_speed
+        ):
+            if audio is None:
+                continue
+            # audio is a float tensor from -1.0 to 1.0. Turn it into
+            # 16-bit integers, the format the rest of our pipeline uses.
+            samples = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
+            samples = np.clip(samples, -1.0, 1.0)
+            chunks.append((samples * 32767).astype("<i2").tobytes())
+        return b"".join(chunks)
+
+else:
+    from piper import PiperVoice
+
+    # Piper finds the matching .onnx.json config automatically, as long as
+    # it sits next to the .onnx file.
+    _voice = PiperVoice.load(settings.piper_voice_path)
+    _SOURCE_RATE = _voice.config.sample_rate   # usually 22,050 Hz
+
+    def _generate(text: str) -> bytes:
+        # The piper-tts API changed between versions, so support both.
+        if hasattr(_voice, "synthesize_stream_raw"):   # piper-tts 1.2.x
+            return b"".join(_voice.synthesize_stream_raw(text))
+        return b"".join(chunk.audio_int16_bytes for chunk in _voice.synthesize(text))
+
+
 def synthesize(text: str) -> bytes:
     """Turn text into 8 kHz, 16-bit PCM audio, ready for send_audio().
 
-    A normal (not async) function: it does heavy CPU work, so main.py runs
-    it in a separate thread with asyncio.to_thread, like transcribe().
+    A normal (not async) function: it does heavy work, so main.py runs it in
+    a separate thread with asyncio.to_thread, like transcribe().
     """
-    text = normalize_for_speech(text)
+    pcm = _generate(normalize_for_speech(text))
 
-    # 1. Generate speech. Piper outputs 16-bit PCM at the voice's own
-    #    sample rate (22,050 Hz for most medium voices).
-    #    The piper-tts API changed between versions, so support both.
-    if hasattr(voice, "synthesize_stream_raw"):   # piper-tts 1.2.x
-        pcm = b"".join(voice.synthesize_stream_raw(text))
-    else:                                          # piper-tts 1.3+
-        pcm = b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(text))
-
-    # 2. Phone audio is 8 kHz, so downsample. This is the reverse of what
-    #    stt.py does (8 kHz up to 16 kHz for Whisper).
-    source_rate = voice.config.sample_rate
-    pcm_8k, _ = audioop.ratecv(pcm, 2, 1, source_rate, 8000, None)
+    # Phone audio is 8 kHz, so downsample from the engine's own rate.
+    pcm_8k, _ = audioop.ratecv(pcm, 2, 1, _SOURCE_RATE, 8000, None)
     return pcm_8k
+
+
+def warm_up_tts() -> None:
+    """Synthesize one short phrase at startup. The first run on the GPU is
+    slow (setup), so do it before any caller is waiting."""
+    synthesize("Hello.")
