@@ -7,7 +7,7 @@ to ask next, and decides when the call ends.
 
 from typing import Literal
 
-from ollama import AsyncClient
+from ollama import AsyncClient, ResponseError
 from pydantic import BaseModel, ValidationError
 
 from config import settings
@@ -63,8 +63,9 @@ Collect these details, one question at a time:
 - callback: the best phone number or time to call them back
 
 Every reply must be JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, reply.
-- Fill in every detail you know so far, from the whole conversation. Use null for unknown ones.
-- Only fill a detail when the caller actually said it. Never guess.
+- Only fill a detail the caller gave in their LATEST message. Use null for everything else,
+  including details you already know (the STATUS note lists those, our system remembers them).
+- Never guess.
 - Callers rarely say "low", "normal" or "urgent". Map what they mean: "no rush", "whenever", "it's okay" = low. "Soon", "today" = normal. "ASAP", "emergency", "right away" = urgent.
 - Sounds like "mhm", "yeah" or "uh huh" on their own are not answers or confirmations.
 - "reply" is what you say out loud next.
@@ -84,6 +85,43 @@ Rules for "reply":
 """
 
 client = AsyncClient()  # connects to the Ollama server at http://localhost:11434
+
+# Thinking models (Qwen 3.x and others) write out reasoning before answering.
+# Great for puzzles, far too slow on a phone call, so we switch it off.
+# Older models don't support the setting at all, and Ollama rejects it,
+# so if that happens once, we stop sending it.
+_send_think = True
+
+
+async def chat(**kwargs):
+    """Every Ollama request goes through here: same model, same keep_alive,
+    thinking off where supported."""
+    global _send_think
+    kwargs.setdefault("model", settings.ollama_model)
+    kwargs.setdefault("keep_alive", "30m")
+    if _send_think:
+        try:
+            return await client.chat(think=False, **kwargs)
+        except (ResponseError, TypeError):
+            # ResponseError: this model doesn't support thinking settings.
+            # TypeError: the ollama library is too old to know "think".
+            _send_think = False
+    return await client.chat(**kwargs)
+
+
+def _print_llm_stats(response) -> None:
+    """Where the LLM time goes. Ollama reports durations in nanoseconds.
+
+    prompt: reading the input (system prompt + history). Grows every turn.
+    output: generating the reply, one token at a time.
+    """
+    try:
+        p_tok, p_ns = response["prompt_eval_count"], response["prompt_eval_duration"]
+        o_tok, o_ns = response["eval_count"], response["eval_duration"]
+        print(f"  llm detail: prompt {p_tok} tok in {p_ns / 1e9:.2f}s | "
+              f"output {o_tok} tok in {o_ns / 1e9:.2f}s ({o_tok / (o_ns / 1e9):.0f} tok/s)")
+    except (KeyError, TypeError, ZeroDivisionError):
+        pass  # some responses (e.g. cached prompts) leave fields out
 
 
 class Conversation:
@@ -138,16 +176,18 @@ class Conversation:
     def _status_note(self) -> str:
         """Tell the model exactly where we are. Our code tracks progress,
         so the model doesn't have to work it out from the history."""
+        known = {f: v for f, v in self.details.model_dump().items() if v}
+        known_text = f"Known so far: {known}. " if known else ""
         missing = self.details.missing()
         if missing:
             needed = ", ".join(FIELD_QUESTIONS[f] for f in missing)
             return (
-                f"STATUS: still needed: {needed}. "
+                f"STATUS: {known_text}Still needed: {needed}. "
                 f"Unless the caller just gave it, ask for {FIELD_QUESTIONS[missing[0]]} next."
             )
         if not self._read_back_done:
-            return "STATUS: all details collected."
-        return "STATUS: details were read back. Set caller_confirmed only if the caller clearly agreed, or update what they corrected."
+            return f"STATUS: {known_text}All details collected."
+        return f"STATUS: {known_text}Details were read back. Set caller_confirmed only if the caller clearly agreed, or update what they corrected."
 
     async def reply(self, caller_text: str) -> tuple[str, bool]:
         """Add what the caller said, get the next reply.
@@ -160,15 +200,17 @@ class Conversation:
 
         # The status note is added for this request only, never stored in
         # history, so the model always sees the CURRENT status, not old ones.
-        response = await client.chat(
-            model=settings.ollama_model,
+        response = await chat(
             messages=self.messages + [{"role": "system", "content": self._status_note()}],
             # Structured output: Ollama forces the reply to match this JSON schema
             format=TurnOutput.model_json_schema(),
-            options={"temperature": 0.2},
-            keep_alive="30m",
+            options={
+                "temperature": 0.2,
+                "num_predict": 200,   # hard cap on output length (tokens)
+            },
         )
         raw = response["message"]["content"]
+        _print_llm_stats(response)
 
         try:
             turn = TurnOutput.model_validate_json(raw)
@@ -177,9 +219,10 @@ class Conversation:
             print(f"LLM returned invalid output: {raw}")
             return self._said("Sorry, could you say that again?"), False
 
-        # Keep the model's JSON in the history, so on the next turn it sees
-        # exactly what it already collected.
-        self.messages.append({"role": "assistant", "content": raw})
+        # The history gets what the assistant actually SAID (see _said), as
+        # plain text, not the model's raw JSON. Shorter prompts = faster replies,
+        # and when our code overrides the model (read-back, notes, goodbye),
+        # the history still matches what the caller really heard.
         self._merge(turn)
         print(f"  details so far: {self.details.model_dump()}")
 
@@ -236,6 +279,7 @@ class Conversation:
     def _said(self, text: str) -> str:
         """Record what the assistant is about to say, and pass it through."""
         self.transcript.append(("assistant", text))
+        self.messages.append({"role": "assistant", "content": text})
         return text
 
     def _merge(self, turn: TurnOutput) -> None:
@@ -276,9 +320,4 @@ def _as_sentence(text: str) -> str:
 
 async def warm_up() -> None:
     """Load the model onto the GPU at startup, so the first caller doesn't wait."""
-    await client.chat(
-        model=settings.ollama_model,
-        messages=[{"role": "user", "content": "hi"}],
-        options={"num_predict": 1},
-        keep_alive="30m",
-    )
+    await chat(messages=[{"role": "user", "content": "hi"}], options={"num_predict": 1})
