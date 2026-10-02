@@ -34,6 +34,7 @@ class TurnOutput(BaseModel):
     callback: str | None = None
     caller_confirmed: bool = False      # caller said the read-back details are correct
     caller_wants_to_end: bool = False   # caller is saying goodbye or wants to hang up
+    identity_confirmed: bool = False    # caller confirmed they are the known contact
     reply: str                          # what the assistant says out loud next
 
 
@@ -61,7 +62,7 @@ Collect these details, one question at a time:
 - urgency: "low", "normal" or "urgent"
 - callback: the best phone number or time to call them back
 
-Every reply must be JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, reply.
+Every reply must be JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, reply.
 - Fill in every detail you know so far, from the whole conversation. Use null for unknown ones.
 - Only fill a detail when the caller actually said it. Never guess.
 - Callers rarely say "low", "normal" or "urgent". Map what they mean: "no rush", "whenever", "it's okay" = low. "Soon", "today" = normal. "ASAP", "emergency", "right away" = urgent.
@@ -88,8 +89,20 @@ client = AsyncClient()  # connects to the Ollama server at http://localhost:1143
 class Conversation:
     """One phone call's conversation: message history plus collected details."""
 
-    def __init__(self, greeting: str, caller_number: str = "", caller_context: str = ""):
+    def __init__(
+        self,
+        greeting: str,
+        caller_number: str = "",
+        caller_context: str = "",
+        known_name: str | None = None,
+        shareable_notes: list[tuple[int, str]] | None = None,
+    ):
         system_prompt = SYSTEM_PROMPT + caller_context
+        if known_name:
+            system_prompt += (
+                f"\nSet identity_confirmed to true only when the caller clearly confirms "
+                f"they are {known_name}. Otherwise keep it false.\n"
+            )
         if caller_number.startswith("+"):
             # A real number: let the assistant offer it instead of asking cold.
             system_prompt += (
@@ -114,6 +127,13 @@ class Conversation:
         self._read_back_done = False   # have we read the details back to the caller?
         self._read_back_snapshot: CallDetails | None = None   # details as last read back
         self._caller_turns = 0
+
+        # Shareable notes: (note_id, text). The LLM never sees these. Our code
+        # says them word for word, once the caller confirms who they are.
+        self.known_name = known_name
+        self._shareable_notes = shareable_notes or []
+        self.identity_confirmed = False
+        self.delivered_note_ids: list[int] = []
 
     def _status_note(self) -> str:
         """Tell the model exactly where we are. Our code tracks progress,
@@ -187,6 +207,18 @@ class Conversation:
             self._read_back_snapshot = self.details.model_copy()
             return self._said(self._read_back_text()), False
 
+        # 4. The caller just confirmed they're the known contact: pass on
+        #    any shareable notes, word for word, then carry on.
+        if turn.identity_confirmed and self.known_name and not self.identity_confirmed:
+            self.identity_confirmed = True
+            pending = [(i, t) for i, t in self._shareable_notes if i not in self.delivered_note_ids]
+            if pending:
+                self.delivered_note_ids.extend(i for i, _ in pending)
+                messages = " ".join(_as_sentence(t) for _, t in pending)
+                return self._said(
+                    f"{settings.owner_name} asked me to pass on a message: {messages} {turn.reply}"
+                ), False
+
         return self._said(turn.reply), False
 
     def _read_back_text(self) -> str:
@@ -234,6 +266,12 @@ PLACEHOLDERS = {"null", "none", "unknown", "n/a", "na", "not given", "not provid
 
 def is_real_value(value: str | None) -> bool:
     return value is not None and value.strip().lower() not in PLACEHOLDERS
+
+
+def _as_sentence(text: str) -> str:
+    """Make sure a note ends with punctuation, so the voice pauses after it."""
+    text = text.strip()
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 async def warm_up() -> None:

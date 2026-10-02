@@ -47,8 +47,53 @@ def normalize_phone(raw: str) -> str | None:
         return "+" + digits
     return None
 
+# "Note for NAME [NUMBER]: TEXT [Share|Private]", case-insensitive.
+NOTE_FORMAT = re.compile(r"^\s*note\s+for\s+(?P<who>[^:]+?)\s*:\s*(?P<body>.*)$", re.IGNORECASE | re.DOTALL)
+# A visibility word at the very end, e.g. "... Monday. Share" or "..., private."
+VISIBILITY_TAG = re.compile(r"[\s.,;:-]*\b(share|shareable|private)\b[\s.!]*$", re.IGNORECASE)
+PHONE_IN_TEXT = re.compile(r"\+?\(?\d[\d\s().-]{8,}\d")
+
+
+def parse_note_format(message: str) -> ParsedNote | None:
+    """Read the standard note format with plain code. Returns None if the
+    message isn't in that format (then the LLM gets a try)."""
+    match = NOTE_FORMAT.match(message)
+    if not match:
+        return None
+
+    who = match.group("who")
+    body = match.group("body").strip()
+
+    # Optional phone number next to the name: "Note for Ahmed 519-555-0123: ..."
+    phone = None
+    phone_match = PHONE_IN_TEXT.search(who)
+    if phone_match:
+        phone = phone_match.group()
+        who = who.replace(phone, "")
+
+    # Optional visibility word at the end. Private unless clearly shared.
+    visibility = "private"
+    tag = VISIBILITY_TAG.search(body)
+    if tag:
+        if tag.group(1).lower().startswith("share"):
+            visibility = "shareable"
+        body = body[:tag.start()].strip()
+
+    return ParsedNote(
+        person_name=who.strip() or None,
+        phone=phone,
+        note=body,
+        visibility=visibility,
+    )
+
 
 async def parse_note(message: str) -> ParsedNote | None:
+    # Fixed format first: exact and reliable. The LLM is only a fallback
+    # for messages written some other way.
+    parsed = parse_note_format(message)
+    if parsed is not None:
+        return parsed
+
     response = await client.chat(
         model=settings.ollama_model,
         messages=[
@@ -67,7 +112,12 @@ async def parse_note(message: str) -> ParsedNote | None:
 async def handle_owner_sms(message: str) -> str:
     """Process a note from the owner. Returns the text to reply with."""
     parsed = await parse_note(message)
-    if parsed is None or not parsed.note:
+    # An empty note, or a "note" that's just the person's name, is a mistake
+    if (
+        parsed is None
+        or not parsed.note.strip()
+        or (parsed.person_name and parsed.note.strip(" .").lower() == parsed.person_name.lower())
+    ):
         return "Sorry, I couldn't understand that note. Try: Note for Ahmed: interview moved to Monday. Share"
 
     # 1. Work out which contact the note is about

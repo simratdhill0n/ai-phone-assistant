@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDis
 
 from call_recorder import CallRecorder
 from config import settings
-from db import init_db, save_call, utcnow
+from db import get_notes, init_db, mark_notes_delivered, save_call, utcnow
 from llm import Conversation, warm_up
 from memory import build_caller_context
 from notes import handle_owner_sms
@@ -118,6 +118,8 @@ async def media_stream(websocket: WebSocket):
     started_at = utcnow()
     stt_hints = ""
     speaking_until = 0.0   # time.monotonic() when the assistant's audio ends
+    private_notes: list[str] = []
+    note_texts: dict[int, str] = {}
 
     try:
         while True:
@@ -138,7 +140,19 @@ async def media_stream(websocket: WebSocket):
                 greeting, caller_context, known_name = await asyncio.to_thread(
                     build_caller_context, caller_number, GREETING
                 )
-                conversation = Conversation(greeting, caller_number, caller_context)
+
+                # Notes about this number. Shareable ones not yet passed on go
+                # to the conversation (spoken by code, never seen by the LLM).
+                # Private ones are kept for the owner's SMS only.
+                notes = await asyncio.to_thread(get_notes, caller_number) if known_name else []
+                shareable = [(n.id, n.text) for n in notes
+                             if n.visibility == "shareable" and n.delivered_at is None]
+                private_notes = [n.text for n in notes if n.visibility == "private"]
+
+                conversation = Conversation(
+                    greeting, caller_number, caller_context, known_name, shareable
+                )
+                note_texts = {n.id: n.text for n in notes}
 
                 # Names Whisper should expect on this call
                 hint_names = [settings.owner_name, settings.assistant_name]
@@ -218,7 +232,19 @@ async def media_stream(websocket: WebSocket):
         # Text the owner, whether the call completed or the caller hung up early
         if conversation:
             call_completed = conversation.completed
-            await notify_owner(conversation.details, caller_number, call_completed)
+            delivered = conversation.delivered_note_ids
+            await notify_owner(
+                conversation.details, caller_number, call_completed,
+                private_notes=private_notes,
+                delivered_notes=[note_texts[i] for i in delivered],
+            )
+
+            # Remember which shareable notes were passed on, so they aren't repeated
+            if delivered:
+                try:
+                    await asyncio.to_thread(mark_notes_delivered, delivered)
+                except Exception as e:
+                    print(f"Failed to mark notes delivered: {e}")
 
             # Save the call. "missed" = they left without telling us anything.
             details = conversation.details

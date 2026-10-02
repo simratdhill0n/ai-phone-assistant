@@ -6,6 +6,7 @@ Switching to PostgreSQL later only means changing DATABASE_URL.
 
 from datetime import datetime, timezone
 
+from sqlalchemy import inspect, text
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from config import settings
@@ -59,6 +60,7 @@ class Note(SQLModel, table=True):
     text: str
     visibility: str            # "private" (never said to caller) or "shareable"
     created_at: datetime = Field(default_factory=utcnow)
+    delivered_at: datetime | None = None   # when a shareable note was passed on
 
 
 # ---------- Setup ----------
@@ -74,6 +76,22 @@ engine = create_engine(
 def init_db() -> None:
     """Create any tables that don't exist yet. Safe to run on every startup."""
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """A tiny hand-made migration.
+
+    create_all() only creates MISSING TABLES. It never changes a table that
+    already exists, so a column added to a model later (like Note.delivered_at)
+    doesn't appear in an existing database. Real projects use a migration tool
+    such as Alembic for this. For now, add the column if it's missing.
+    """
+    existing = {column["name"] for column in inspect(engine).get_columns("note")}
+    if "delivered_at" not in existing:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE note ADD COLUMN delivered_at DATETIME"))
+        print("Database migrated: added note.delivered_at")
 
 
 # ---------- Writing ----------
@@ -176,3 +194,14 @@ def get_notes(phone: str) -> list[Note]:
     with Session(engine) as session:
         statement = select(Note).where(Note.phone == phone).order_by(Note.created_at)
         return list(session.exec(statement))
+
+
+def mark_notes_delivered(note_ids: list[int]) -> None:
+    """Record that these shareable notes were passed on, so they aren't repeated."""
+    if not note_ids:
+        return
+    with Session(engine) as session:
+        for note in session.exec(select(Note).where(Note.id.in_(note_ids))):
+            note.delivered_at = utcnow()
+            session.add(note)
+        session.commit()

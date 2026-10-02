@@ -14,7 +14,13 @@ TWILIO_MESSAGES_URL = (
 )
 
 
-def format_summary(details: CallDetails, caller_number: str, completed: bool) -> str:
+def format_summary(
+    details: CallDetails,
+    caller_number: str,
+    completed: bool,
+    private_notes: list[str] | None = None,
+    delivered_notes: list[str] | None = None,
+) -> str:
     """Build a short SMS. Short matters: every 160 characters is billed as
     a separate message segment."""
     number = caller_number or "unknown number"
@@ -33,6 +39,12 @@ def format_summary(details: CallDetails, caller_number: str, completed: bool) ->
     lines.append(f"Callback: {details.callback or number}")
     if not completed:
         lines.append("(Caller hung up before confirming)")
+
+    # Context for YOU, never said to the caller. Latest two keep the SMS short.
+    if delivered_notes:
+        lines.append("Passed on: " + " / ".join(delivered_notes))
+    if private_notes:
+        lines.append("Your notes: " + " / ".join(private_notes[-2:]))
 
     return "\n".join(lines)
 
@@ -61,10 +73,16 @@ async def send_sms(to: str, body: str) -> None:
         response.raise_for_status()  # turn 4xx/5xx replies into exceptions
 
 
-async def notify_owner(details: CallDetails, caller_number: str, completed: bool) -> None:
+async def notify_owner(
+    details: CallDetails,
+    caller_number: str,
+    completed: bool,
+    private_notes: list[str] | None = None,
+    delivered_notes: list[str] | None = None,
+) -> None:
     """Text the owner a call summary. Never raises: a failed SMS must not
     crash the server."""
-    body = format_summary(details, caller_number, completed)
+    body = format_summary(details, caller_number, completed, private_notes, delivered_notes)
     try:
         await send_sms(settings.owner_phone, body)
         print(f"Summary texted to owner:\n{body}")
