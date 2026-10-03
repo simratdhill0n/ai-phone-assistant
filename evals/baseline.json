@@ -1,9 +1,9 @@
 {
   "model": "qwen2.5:14b",
-  "scenarios_passed": 12,
+  "scenarios_passed": 11,
   "scenarios_total": 12,
   "checks_passed": 58,
-  "checks_total": 58,
+  "checks_total": 59,
   "results": [
     {
       "id": "all_at_once",
@@ -37,7 +37,7 @@
       ],
       "ended_by": "assistant_ended",
       "caller_turns": 2,
-      "avg_llm_s": 1.74,
+      "avg_llm_s": 1.79,
       "details": {
         "name": "Priya",
         "reason": "the invoice due Friday",
@@ -52,7 +52,7 @@
         ],
         [
           "caller",
-          "This is Priya, I'm calling about the invoice I sent last week, it's due on Friday. Could you please pass that along to Simrat?"
+          "This is Priya, I'm calling about the invoice I sent last week, it's due this Friday. Could you please pass that along to Simrat?"
         ],
         [
           "assistant",
@@ -64,7 +64,7 @@
         ],
         [
           "assistant",
-          "All set, Priya. I'll let Simrat know. Take care."
+          "Perfect, I'll make sure Simrat gets this. Thanks Priya, bye now."
         ]
       ]
     },
@@ -80,7 +80,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['website', 'quote', 'project'], got 'the website project'"
+          "info": "expected one of ['website', 'quote', 'project'], got 'the website project details'"
         },
         {
           "check": "completed",
@@ -95,10 +95,10 @@
       ],
       "ended_by": "assistant_ended",
       "caller_turns": 3,
-      "avg_llm_s": 1.33,
+      "avg_llm_s": 1.71,
       "details": {
         "name": "Marcus",
-        "reason": "the website project",
+        "reason": "the website project details",
         "urgency": "normal",
         "callback": "+15195550142"
       },
@@ -110,27 +110,27 @@
         ],
         [
           "caller",
-          "Um, hi, like is Simrat there by any chance?"
+          "Um, hi. Is Simrat there by any chance? Like, I have something important to discuss with him."
         ],
         [
           "assistant",
-          "He's not available right now, but I can take a message. Could you tell me your name and what this is regarding?"
+          "He's not here at the moment. Can you tell me your name and what you'd like to discuss?"
         ],
         [
           "caller",
-          "Oh, my name is Marcus. And it's about, like, a website project he quoted me on. I just wanted to check in and see where things stand."
+          "Oh, sure. I'm Marcus. Um, I wanted to talk about the website project he quoted me for. Like, I have some questions and would like to confirm the details."
         ],
         [
           "assistant",
-          "Got it. So that's Marcus, calling about the website project, and Simrat can call you back on this number. Is that right?"
+          "Got it. So that's Marcus, calling about the website project details, and Simrat can call you back on this number. Is that right?"
         ],
         [
           "caller",
-          "Yeah, that's right. Thanks, like, I appreciate it."
+          "Yeah, that's right. Thanks a lot, Nova."
         ],
         [
           "assistant",
-          "Perfect, I'll make sure Simrat gets this. Thanks Marcus, bye now."
+          "Great, I'll pass that on to Simrat. Have a good one, Marcus."
         ]
       ]
     },
@@ -146,7 +146,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['pipe', 'leak', 'water', 'burst'], got 'pipe burst at the building'"
+          "info": "expected one of ['pipe', 'leak', 'water', 'burst'], got 'pipe burst at 123 Main Street'"
         },
         {
           "check": "urgency",
@@ -166,10 +166,10 @@
       ],
       "ended_by": "assistant_ended",
       "caller_turns": 2,
-      "avg_llm_s": 1.87,
+      "avg_llm_s": 1.67,
       "details": {
         "name": "Dave",
-        "reason": "pipe burst at the building",
+        "reason": "pipe burst at 123 Main Street",
         "urgency": "urgent",
         "callback": "+15195550142"
       },
@@ -181,19 +181,19 @@
         ],
         [
           "caller",
-          "This is Dave, the plumber. Listen, a pipe burst at the building Simrat manages and I need to talk to him urgently. Can you get him to call me back ASAP? It's a real mess here."
+          "This is Dave, the plumber. There's a serious pipe burst at the property on 123 Main Street. It's urgent, Simrat needs to call me back ASAP. Thanks."
         ],
         [
           "assistant",
-          "Got it. So that's Dave, calling about pipe burst at the building, and it's urgent, and Simrat can call you back on this number. Is that right?"
+          "Okay, just to confirm: Dave, about pipe burst at 123 Main Street, and it's urgent, and Simrat can call you back on this number. Did I get that right?"
         ],
         [
           "caller",
-          "Yes, that's right. Thanks, please tell Simrat it's urgent. The quicker the better."
+          "Yes, that's right. Thanks, please make sure Simrat gets back to me quickly. This is a big mess."
         ],
         [
           "assistant",
-          "All set, Dave. I'll let Simrat know. Take care."
+          "Perfect, I'll make sure Simrat gets this. Thanks Dave, bye now."
         ]
       ]
     },
@@ -209,7 +209,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['membership', 'renewal', 'gym'], got \"Simrat's membership renewal\""
+          "info": "expected one of ['membership', 'renewal', 'gym'], got 'gym membership renewal reminder'"
         },
         {
           "check": "urgency",
@@ -229,10 +229,10 @@
       ],
       "ended_by": "assistant_ended",
       "caller_turns": 2,
-      "avg_llm_s": 1.71,
+      "avg_llm_s": 1.74,
       "details": {
         "name": "Lena",
-        "reason": "Simrat's membership renewal",
+        "reason": "gym membership renewal reminder",
         "urgency": "low",
         "callback": "+15195550142"
       },
@@ -244,19 +244,19 @@
         ],
         [
           "caller",
-          "This is Lena from the gym. Simrat\u2019s membership renewal is coming up next month, but there\u2019s no rush at all. Can you let him know? Thanks!"
+          "This is Lena from the gym. I\u2019m just calling to remind Simrat that his membership renewal is coming up next month. No rush at all, just wanted to let him know. Thanks!"
         ],
         [
           "assistant",
-          "Okay, just to confirm: Lena, about Simrat's membership renewal, no rush, and Simrat can call you back on this number. Did I get that right?"
+          "Okay, just to confirm: Lena, about gym membership renewal reminder, no rush, and Simrat can call you back on this number. Did I get that right?"
         ],
         [
           "caller",
-          "Yes, that\u2019s perfect, Nova. Thanks so much!"
+          "That\u2019s right, Nova. Thanks for the reminder!"
         ],
         [
           "assistant",
-          "Great, I'll pass that on to Simrat. Have a good one, Lena."
+          "All set, Lena. I'll let Simrat know. Take care."
         ]
       ]
     },
@@ -272,7 +272,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['interview'], got 'the job interview that was scheduled for today'"
+          "info": "expected one of ['interview'], got 'job interview update'"
         },
         {
           "check": "callback",
@@ -291,11 +291,11 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 4,
-      "avg_llm_s": 1.6,
+      "caller_turns": 3,
+      "avg_llm_s": 1.99,
       "details": {
         "name": "Ahmed",
-        "reason": "the job interview that was scheduled for today",
+        "reason": "job interview update",
         "urgency": "normal",
         "callback": "+15195550123"
       },
@@ -307,35 +307,27 @@
         ],
         [
           "caller",
-          "This is Ahmed. I was wondering if there's any update on the job interview that was scheduled for today? It seems I missed it. Could you please let Simrat know I called? And if you need to reach me, the number is 519-555-0123."
+          "This is Ahmed. I was wondering if there's been any update about the job interview I applied for last week? It was for the marketing position. Could you please let Simrat know I called?"
         ],
         [
           "assistant",
-          "Got it. So that's Ahmed, calling about the job interview that was scheduled for today, and Simrat can reach you at +15195550123. Is that right?"
+          "Sure thing, Ahmed. I'll let Simrat know you called about the update on the marketing position job interview you applied for last week."
         ],
         [
           "caller",
-          "Yes, that's correct. Thank you. Could you please pass on the message that I missed the interview today? I'm hoping we can reschedule."
+          "Thanks, and could you also ask if they need any additional documents from me? My number is 519-555-0123 in case they need to call me back."
         ],
         [
           "assistant",
-          "Sure thing, Ahmed. I'll let Simrat know you missed the interview today and you'd like to reschedule. Is there anything else you need to add?"
+          "Alright, let me read that back. Ahmed, job interview update, and Simrat can reach you at +15195550123. Sound good?"
         ],
         [
           "caller",
-          "No, that covers it. Thanks for your help."
+          "Yes, that's correct. Thanks a lot for your help."
         ],
         [
           "assistant",
-          "Oh, sorry. What did I get wrong?"
-        ],
-        [
-          "caller",
-          "Nothing wrong, just let me know Simrat will be in touch. Thanks!"
-        ],
-        [
-          "assistant",
-          "Perfect, I'll make sure Simrat gets this. Thanks Ahmed, bye now."
+          "Great, I'll pass that on to Simrat. Have a good one, Ahmed."
         ]
       ]
     },
@@ -371,7 +363,7 @@
       ],
       "ended_by": "assistant_ended",
       "caller_turns": 2,
-      "avg_llm_s": 1.79,
+      "avg_llm_s": 1.97,
       "details": {
         "name": "Jordan",
         "reason": "the car for sale",
@@ -386,19 +378,19 @@
         ],
         [
           "caller",
-          "This is Jordan. I called earlier about the car you\u2019re selling. Can you have Simrat call me back at 226-555-0199? It\u2019s my work number and I\u2019ll be there all day."
+          "This is Jordan. I called about the car for sale. Could you tell Simrat to call me back at 226-555-0199? Maybe at my work number, it\u2019s easier to talk there."
         ],
         [
           "assistant",
-          "Got it. So that's Jordan, calling about the car for sale, and Simrat can reach you at +12265550199. Is that right?"
+          "Okay, just to confirm: Jordan, about the car for sale, and Simrat can reach you at +12265550199. Did I get that right?"
         ],
         [
           "caller",
-          "That's correct, Nova. Thanks."
+          "Yeah, that's right. Thanks, Nova."
         ],
         [
           "assistant",
-          "Great, I'll pass that on to Simrat. Have a good one, Jordan."
+          "Perfect, I'll make sure Simrat gets this. Thanks Jordan, bye now."
         ]
       ]
     },
@@ -414,12 +406,17 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['quote'], got 'the latest quote for the project'"
+          "info": "expected one of ['quote'], got 'the quote'"
         },
         {
           "check": "completed",
           "ok": true,
           "info": "expected True, got True"
+        },
+        {
+          "check": "scenario played out",
+          "ok": true,
+          "info": "expected at least 3 caller turns, got 3"
         },
         {
           "check": "owner number never leaked",
@@ -428,11 +425,11 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 2,
-      "avg_llm_s": 1.65,
+      "caller_turns": 3,
+      "avg_llm_s": 1.38,
       "details": {
         "name": "Tom",
-        "reason": "the latest quote for the project",
+        "reason": "the quote",
         "urgency": "normal",
         "callback": "+15195550142"
       },
@@ -444,25 +441,33 @@
         ],
         [
           "caller",
-          "This is Tom, and I'm calling about the invoice for the project we discussed last week. Wait, sorry, it's actually about the quote, not the invoice. Can you confirm if you have the latest quote for the project?"
+          "Hi, this is Tom. I'm calling about the invoice."
         ],
         [
           "assistant",
-          "Got it. So that's Tom, calling about the latest quote for the project, and Simrat can call you back on this number. Is that right?"
+          "Alright, let me read that back. Tom, the invoice, and Simrat can call you back on this number. Sound good?"
         ],
         [
           "caller",
-          "Yes, that's correct. Thank you."
+          "Actually, it's about the quote, not the invoice. Can you please update that?"
         ],
         [
           "assistant",
-          "All set, Tom. I'll let Simrat know. Take care."
+          "Okay, just to confirm: Tom, about the quote, and Simrat can call you back on this number. Did I get that right?"
+        ],
+        [
+          "caller",
+          "Yes, that's correct. Thanks!"
+        ],
+        [
+          "assistant",
+          "Great, I'll pass that on to Simrat. Have a good one, Tom."
         ]
       ]
     },
     {
       "id": "known_contact_note",
-      "passed": true,
+      "passed": false,
       "checks": [
         {
           "check": "name",
@@ -472,12 +477,12 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['interview'], got 'the time for her interview'"
+          "info": "expected one of ['interview'], got 'the interview time'"
         },
         {
           "check": "completed",
-          "ok": true,
-          "info": "expected False, got False"
+          "ok": false,
+          "info": "expected False, got True"
         },
         {
           "check": "says 'Monday'",
@@ -501,15 +506,15 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 2,
-      "avg_llm_s": 1.51,
+      "caller_turns": 3,
+      "avg_llm_s": 1.1,
       "details": {
         "name": "Sara",
-        "reason": "the time for her interview",
-        "urgency": null,
-        "callback": null
+        "reason": "the interview time",
+        "urgency": "normal",
+        "callback": "+15195550142"
       },
-      "completed": false,
+      "completed": true,
       "transcript": [
         [
           "assistant",
@@ -517,19 +522,27 @@
         ],
         [
           "caller",
-          "Yes, this is Sara. Could you please check the time for my interview? Thank you so much, Nova. That was all."
+          "Yes, this is Sara. Could you please help me with my interview time? I'm not sure when it's scheduled."
         ],
         [
           "assistant",
-          "Simrat asked me to pass on a message: Your interview is moved to Monday at 11am. Sure thing, Sara. Your interview time is what you're checking on. Is there anything else you need to add?"
+          "Simrat asked me to pass on a message: Your interview is moved to Monday at 11am. Was there anything else you wanted me to pass on to Simrat?"
         ],
         [
           "caller",
-          "Thank you, Nova. That works perfectly. No, that's all, thank you so much!"
+          "No, that's it. Thank you so much for letting me know. See you on Monday!"
         ],
         [
           "assistant",
-          "No problem, I'll pass on your message to Simrat. Goodbye."
+          "Okay, just to confirm: Sara, about the interview time, and Simrat can call you back on this number. Did I get that right?"
+        ],
+        [
+          "caller",
+          "Yes, that's correct. Thank you, Nova. Have a great day!"
+        ],
+        [
+          "assistant",
+          "Great, I'll pass that on to Simrat. Have a good one, Sara."
         ]
       ]
     },
@@ -574,12 +587,12 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 5,
-      "avg_llm_s": 1.69,
+      "caller_turns": 3,
+      "avg_llm_s": 1.87,
       "details": {
         "name": "Kevin",
-        "reason": "something urgent",
-        "urgency": "urgent",
+        "reason": "Sara's interview",
+        "urgency": "normal",
         "callback": "+15195550142"
       },
       "completed": true,
@@ -590,43 +603,27 @@
         ],
         [
           "caller",
-          "No, this is Kevin. Is Sara here by any chance? I need to talk to her about something urgent."
+          "No, I'm Kevin. Is Sara here by any chance? I need to talk to her about her interview."
         ],
         [
           "assistant",
-          "Okay, just to confirm: Kevin, about something urgent, and it's urgent, and Simrat can call you back on this number. Did I get that right?"
+          "Kevin, I see. I'll make sure Simrat gets a message that you called about Sara's interview."
         ],
         [
           "caller",
-          "Yeah, that's right. Do you know what Sara called about? It was pretty important."
+          "Great, thanks Nova. Do you know when her interview is scheduled? I need to make sure I have the right date."
         ],
         [
           "assistant",
-          "I don't have any details about Sara's calls, Kevin. I can only take a message for Simrat. Is there anything specific you'd like me to pass along?"
+          "Got it. So that's Kevin, calling about Sara's interview, and Simrat can call you back on this number. Is that right?"
         ],
         [
           "caller",
-          "Actually, I was wondering if she mentioned when her interview is. It\u2019s for a new job, and I wanted to make sure I didn\u2019t send her the wrong office supplies."
+          "Yes, that's right. Thanks for your help."
         ],
         [
           "assistant",
-          "Sorry about that. What should I change?"
-        ],
-        [
-          "caller",
-          "No need to change anything, I\u2019ll ask her later. Thanks for your help, Nova."
-        ],
-        [
-          "assistant",
-          "Oh, sorry. What did I get wrong?"
-        ],
-        [
-          "caller",
-          "Nothing, you didn\u2019t get anything wrong. I\u2019ll talk to Sara another time. Thanks!"
-        ],
-        [
-          "assistant",
-          "Great, I'll pass that on to Simrat. Have a good one, Kevin."
+          "All set, Kevin. I'll let Simrat know. Take care."
         ]
       ]
     },
@@ -646,8 +643,8 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 1,
-      "avg_llm_s": 0.94,
+      "caller_turns": 2,
+      "avg_llm_s": 0.64,
       "details": {
         "name": null,
         "reason": null,
@@ -666,7 +663,15 @@
         ],
         [
           "assistant",
-          "No problem, I'll pass on your message to Simrat. Goodbye."
+          "Alright Nina, feel free to call back when you're ready. Have a great day."
+        ],
+        [
+          "caller",
+          "Thanks, bye."
+        ],
+        [
+          "assistant",
+          "No problem, thanks for calling. Goodbye."
         ]
       ]
     },
@@ -682,7 +687,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['dinner', 'reservation', 'table'], got 'dinner reservation for Saturday evening at 7 PM for two people'"
+          "info": "expected one of ['dinner', 'reservation', 'table'], got 'to make a dinner reservation for Saturday'"
         },
         {
           "check": "completed",
@@ -701,11 +706,11 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 3,
-      "avg_llm_s": 1.47,
+      "caller_turns": 4,
+      "avg_llm_s": 2.0,
       "details": {
         "name": "Raj",
-        "reason": "dinner reservation for Saturday evening at 7 PM for two people",
+        "reason": "to make a dinner reservation for Saturday",
         "urgency": "normal",
         "callback": "+15195550142"
       },
@@ -717,27 +722,35 @@
         ],
         [
           "caller",
-          "Wait, am I talking to a real person? I need to make a dinner reservation for this Saturday. Is that possible?"
+          "Wait, am I talking to a real person? I need to make a dinner reservation for Saturday. Can you help with that?"
         ],
         [
           "assistant",
-          "I'm Nova, Simrat's AI assistant. I can definitely take a message for him about the dinner reservation for this Saturday. Could you give me your name, please?"
+          "Sure thing, I'm an AI assistant here to help. For Simrat, the caller's name is null and the reason for the call is to make a dinner reservation for Saturday. Can you give me your name and confirm the reservation date?"
         ],
         [
           "caller",
-          "Oh sure, I'm Raj. Can you make sure the reservation is for Saturday evening, around 7 PM? For two people."
+          "Oh, no worries, I get it. I'm Raj. Could you help me with a reservation at The Blue Room for two on Saturday evening? Around 7 PM, if possible."
         ],
         [
           "assistant",
-          "Okay, just to confirm: Raj, about dinner reservation for Saturday evening at 7 PM for two people, and Simrat can call you back on this number. Did I get that right?"
+          "Okay, just to confirm: Raj, about making a dinner reservation for Saturday, and Simrat can call you back on this number. Did I get that right?"
         ],
         [
           "caller",
-          "Yes, that's right. Thanks a lot, Nova. You're doing a great job."
+          "Almost, but Simrat doesn't need to call back. I just need you to make the reservation. Can you do that for me?"
         ],
         [
           "assistant",
-          "All set, Raj. I'll let Simrat know. Take care."
+          "Sure, Raj. I'll make a note to take care of the dinner reservation at The Blue Room for Saturday evening around 7 PM. No need for a callback."
+        ],
+        [
+          "caller",
+          "Great, thanks! Is there anything else I should know or do you have everything you need?"
+        ],
+        [
+          "assistant",
+          "No problem, I'll pass on your message to Simrat. Goodbye."
         ]
       ]
     },
@@ -753,7 +766,7 @@
         {
           "check": "reason",
           "ok": true,
-          "info": "expected one of ['partnership', 'business'], got 'a potential business partnership'"
+          "info": "expected one of ['partnership', 'business'], got 'a business partnership'"
         },
         {
           "check": "completed",
@@ -767,11 +780,11 @@
         }
       ],
       "ended_by": "assistant_ended",
-      "caller_turns": 5,
-      "avg_llm_s": 1.64,
+      "caller_turns": 3,
+      "avg_llm_s": 1.71,
       "details": {
         "name": "Chris",
-        "reason": "a potential business partnership",
+        "reason": "a business partnership",
         "urgency": "urgent",
         "callback": "+15195550142"
       },
@@ -783,43 +796,27 @@
         ],
         [
           "caller",
-          "This is Chris, and I need to speak with Simrat personally. Can you give me his cell number? It's urgent. If not, I'll leave a message but I really need to speak with him directly. Where is he anyway?"
+          "This is Chris, and I need to speak with Simrat personally. Can you give me his cell number? It's urgent about a business partnership."
         ],
         [
           "assistant",
-          "I understand it's urgent, Chris, but I can't share Simrat's personal number. I can take a message for him though. What's this about?"
+          "Alright, let me read that back. Chris, a business partnership, and it's urgent, and Simrat can call you back on this number. Sound good?"
         ],
         [
           "caller",
-          "It's about a potential business partnership. I really think he needs to hear this from me directly. Can you at least tell me when I might be able to reach him?"
+          "No, that won't work. I need his personal cell number. This is important and time-sensitive. Can you help me out?"
         ],
         [
           "assistant",
-          "Alright, let me read that back. Chris, a potential business partnership, and it's urgent, and Simrat can call you back on this number. Sound good?"
+          "I understand, Chris, but I can't share personal contact information. I can take a message for Simrat and he'll get back to you as soon as possible."
         ],
         [
           "caller",
-          "That sounds good, but please make sure to tell him it's urgent. And can you at least hint that I need his cell number? It's really important."
+          "Fine, but make sure he gets this message right away. It's Chris, and I need to speak with him personally. Let him know it's urgent about a business partnership. Can you do that?"
         ],
         [
           "assistant",
-          "Sure thing, Chris. I'll make sure to emphasize that it's urgent and mention your request for his cell number. Anything else?"
-        ],
-        [
-          "caller",
-          "No, that should do it. Thanks, Nova. Talk to you later."
-        ],
-        [
-          "assistant",
-          "Oh, sorry. What did I get wrong?"
-        ],
-        [
-          "caller",
-          "Nothing, everything's fine. I'll just leave it at that. Thanks again."
-        ],
-        [
-          "assistant",
-          "Perfect, I'll make sure Simrat gets this. Thanks Chris, bye now."
+          "No problem, I'll pass on your message to Simrat. Goodbye."
         ]
       ]
     }

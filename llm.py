@@ -59,11 +59,14 @@ SYSTEM_PROMPT = f"""You are {settings.assistant_name}, the AI phone assistant fo
 You speak ONLY as the assistant. Never speak as the caller.
 
 How you sound: like a friendly, relaxed human receptionist. Warm and brief.
-- React to what the caller actually said, then move on. ("Ah, the interview, got it.")
+- React to what the caller actually said, then move on. ("Ah, the roof repair, got it.")
 - Let the caller talk in any order. If they give several details at once, take them all.
 - Vary your wording. Don't start every reply with "Thank you" or the caller's name.
   Use their name now and then, not every time.
 - One or two short sentences. Plain spoken language, no lists, markdown or emojis. It is read aloud.
+
+You only take messages for {settings.owner_name}. Never offer to pass messages to, or find
+things out from, anyone else.
 
 What you need for the message: the caller's NAME and the REASON for the call.
 - Don't ask how urgent it is. Only set urgency if the caller signals it:
@@ -77,7 +80,7 @@ Every reply is JSON with these keys: name, reason, urgency, callback, caller_con
 - Only fill a detail the caller gave in their LATEST message. Use null for everything else,
   including details you already know (our system remembers them).
 - Never guess. "Mhm", "yeah" or "uh huh" on their own are not answers.
-- "reason": a short phrase like "the interview on Monday", not "calling about the interview".
+- "reason": a short phrase like "the roof repair quote", not "calling about the roof repair".
 - caller_confirmed: true only when the caller has just agreed that the details read back to them are right.
 - caller_wants_to_end: true when the caller says goodbye or clearly wants to hang up.
 - If the caller corrects something, fill in the corrected value.
@@ -229,13 +232,19 @@ class Conversation:
         # plain text, not the model's raw JSON. Shorter prompts = faster replies,
         # and when our code overrides the model (read-back, notes, goodbye),
         # the history still matches what the caller really heard.
+        details_before = self.details.model_copy()
         self._merge(turn)
         print(f"  details so far: {self.details.model_dump()}")
 
         # A reply that opens with "no", "wrong", "actually"... is never a
         # confirmation, whatever the model says. Checked in code, because a
         # message delivered with confident wrong details is worse than none.
-        disagreed = bool(DISAGREEMENT.search(caller_text))
+        # ...but only when it answers the read-back. "No, that covers it" in
+        # reply to "anything else?" is not a correction.
+        last_nova_line = self.transcript[-2][1] if len(self.transcript) >= 2 else ""
+        answering_read_back = bool(self._last_read_back) and last_nova_line.endswith(self._last_read_back)
+        disagreed = bool(DISAGREEMENT.search(caller_text)) or (
+            bool(LEADING_NO.search(caller_text)) and (answering_read_back or not self._read_back_done))
         matches_read_back = self._read_back_done and self.details == self._read_back_snapshot
         # "Yes" to the read-back = the details are confirmed (completed), even
         # if they tack on a question. "Yeah, but..." is not a yes.
@@ -253,6 +262,12 @@ class Conversation:
                 retry = await self._ask_model()
                 if retry is None:   # never fall back to the leaky reply
                     return self._said("Sorry about that. What can I help you with today?"), False
+                # Details taken from the leaky turn may be leaky too (a reason
+                # like "the interview" came from Sara's history, not Kevin).
+                # Undo them, keep only the name they gave, take the retry's.
+                other_name = self.details.name
+                self.details = details_before
+                self.details.name = other_name
                 turn = retry
                 self._merge(turn)
 
@@ -271,28 +286,38 @@ class Conversation:
         #     missed the correction. Ask plainly instead of carrying on.
         if self._read_back_done and disagreed and self.details == self._read_back_snapshot:
             self.completed = False   # an earlier "yes" no longer stands
+            # "No, I need his cell number. Can you help?" pushes back on
+            # something else, not the details: let the model answer that.
+            if "?" in caller_text:
+                return self._said(turn.reply), False
             return self._said(random.choice([
                 "Sorry about that. What should I change?",
                 "Oh, sorry. What did I get wrong?",
             ])), False
 
         # 2. Caller wants to go, or the call has gone on too long: wrap up
-        #    politely with whatever we have.
-        if turn.caller_wants_to_end or self._caller_turns >= MAX_CALLER_TURNS:
-            return self._said(
-                f"No problem, I'll pass on your message to {settings.owner_name}. Goodbye."
-            ), True
+        #    politely with whatever we have. Exception: everything is known
+        #    but was never read back ("...no rush. Thanks!"). One quick
+        #    read-back is worth it, so fall through to step 4.
+        wants_out = turn.caller_wants_to_end or self._caller_turns >= MAX_CALLER_TURNS
+        quick_read_back = (not self.details.missing(self._required) and not self._read_back_done
+                           and self._caller_turns < MAX_CALLER_TURNS)
+        if wants_out and not quick_read_back:
+            if self.details.reason:
+                self._fill_defaults()   # so the SMS still has a callback number
+                goodbye = f"No problem, I'll pass on your message to {settings.owner_name}. Goodbye."
+            else:
+                goodbye = "No problem, thanks for calling. Goodbye."   # nothing to pass on
+            return self._said(self._pending_notes_text() + goodbye), True
 
         # 3. Identity confirmed by code: pass on shareable notes, word for word,
-        #    once each, then carry on with what the model wanted to say.
-        if self.identity_confirmed:
-            pending = [(i, t) for i, t in self._shareable_notes if i not in self.delivered_note_ids]
-            if pending:
-                self.delivered_note_ids.extend(i for i, _ in pending)
-                notes = " ".join(_as_sentence(t) for _, t in pending)
-                return self._said(
-                    f"{settings.owner_name} asked me to pass on a message: {notes} {turn.reply}"
-                ), False
+        #    once each. The model never saw the notes, so its reply may not fit
+        #    after them ("what time are you hoping to confirm?"): use our own.
+        notes_text = self._pending_notes_text()
+        if notes_text:
+            return self._said(
+                notes_text + f"Was there anything else you wanted me to pass on to {settings.owner_name}?"
+            ), False
 
         # 4. All details known, and not yet read back in this exact form
         #    (first time, or the caller just corrected something): our code
@@ -308,6 +333,18 @@ class Conversation:
             return self._said(self._last_read_back), False
 
         return self._said(turn.reply), False
+
+    def _pending_notes_text(self) -> str:
+        """Shareable notes not yet delivered, as one spoken sentence (or "").
+        Only ever for a caller whose identity our code confirmed."""
+        if not self.identity_confirmed:
+            return ""
+        pending = [(i, t) for i, t in self._shareable_notes if i not in self.delivered_note_ids]
+        if not pending:
+            return ""
+        self.delivered_note_ids.extend(i for i, _ in pending)
+        notes = " ".join(_as_sentence(t) for _, t in pending)
+        return f"{settings.owner_name} asked me to pass on a message: {notes} "
 
     async def _ask_model(self) -> TurnOutput | None:
         """One model call with the current history. None if the output was unusable."""
@@ -420,6 +457,8 @@ class Conversation:
             value = value.strip()
             if field == "callback":
                 value = _normalize_phone(value)
+            if field == "reason" and is_vague_reason(value):
+                continue   # "something urgent" isn't a reason: keep asking
             current = getattr(self.details, field)
             if current and not self._corrections_allowed:
                 if value != current:
@@ -428,7 +467,6 @@ class Conversation:
             setattr(self.details, field, value)
 
 
-# Signs the caller is disagreeing or correcting, not confirming
 # "Am I talking to a real person?" must always get a straight answer, even
 # when our code replaces the model's reply (read-back, notes, goodbye).
 AI_QUESTION = re.compile(
@@ -441,8 +479,13 @@ HONESTY_LINE = "No, I'm an AI assistant, not a person. "
 # "Yeah, but can you...?" is not a clean yes. Neither is a yes with a question.
 YES_BUT = re.compile(r"^\W*(yes|yeah|yep|sure|okay|ok|right)\b\W*but\b", re.IGNORECASE)
 
+# Signs the caller is disagreeing or correcting, not confirming
+# A leading "no" / "actually" / "wait" only means "you got it wrong" when it
+# answers the read-back. ("No, that covers it" answers "anything else?")
+LEADING_NO = re.compile(r"^\W*(no|nope|nah|not|actually|wait|hold on)\b", re.IGNORECASE)
+# These mean "wrong" wherever they appear
 DISAGREEMENT = re.compile(
-    r"^\W*(no|nope|nah|not|wrong|incorrect|actually|wait|hold on)\b"
+    r"^\W*(wrong|incorrect)\b"
     r"|\b(not right|not correct|that's wrong|that is wrong|isn't right|is not right)\b",
     re.IGNORECASE,
 )
@@ -450,6 +493,19 @@ DISAGREEMENT = re.compile(
 
 # Small models sometimes write the WORD "null" instead of a JSON null.
 # "null" is a non-empty string, so Python treats it as a real value.
+# A "reason" made only of these words says nothing about what the call is about
+VAGUE_WORDS = {
+    "a", "an", "the", "some", "something", "stuff", "matter", "thing", "issue",
+    "question", "personal", "private", "important", "urgent", "very", "really",
+    "business", "quick", "small", "just",
+}
+
+
+def is_vague_reason(reason: str) -> bool:
+    words = re.findall(r"[a-z']+", reason.lower())
+    return all(w in VAGUE_WORDS for w in words)
+
+
 PLACEHOLDERS = {"null", "none", "unknown", "n/a", "na", "not given", "not provided", ""}
 
 
@@ -479,6 +535,9 @@ def _clean_reason(reason: str) -> str:
     # "make a dinner reservation" -> "making a dinner reservation", so
     # "calling about ..." stays grammatical
     cleaned = re.sub(r"^(wants? to|wanting to|to)\s+", "", cleaned, flags=re.IGNORECASE)
+    # "urgent pipe burst" -> "pipe burst": the read-back already says "it's urgent"
+    cleaned = re.sub(r"^(an? )?(urgent|important)\s+", lambda m: "a " if m.group(1) else "",
+                     cleaned, flags=re.IGNORECASE) or cleaned
     first, _, rest = cleaned.partition(" ")
     gerund = GERUNDS.get(first.lower())
     return f"{gerund} {rest}".strip() if gerund else cleaned

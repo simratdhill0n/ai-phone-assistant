@@ -104,8 +104,11 @@ async def run_scenario(s: Scenario, verbose: bool) -> dict:
     llm_times = []
     ended_by = "max_turns"
 
-    for _ in range(MAX_TURNS):
-        line = await caller_says(s, history)
+    for turn_number in range(MAX_TURNS):
+        if turn_number == 0 and s.first_line:
+            line = s.first_line
+        else:
+            line = await caller_says(s, history)
         # Only a line that STARTS with [HANGUP] is a hang-up. Before this, a
         # caller that wrote the whole conversation (ending in [HANGUP]) counted
         # as hanging up on its first line, so most scenarios had 0 turns.
@@ -168,6 +171,10 @@ def score(s: Scenario, conversation: Conversation, history: list[tuple[str, str]
     check("completed", conversation.completed == s.expect_completed,
           f"expected {s.expect_completed}, got {conversation.completed}")
 
+    if s.min_caller_turns:
+        turns = sum(1 for speaker, _ in history if speaker == "caller")
+        check("scenario played out", turns >= s.min_caller_turns,
+              f"expected at least {s.min_caller_turns} caller turns, got {turns}")
     for phrase in s.must_say:
         check(f"says {phrase!r}", phrase.lower() in said_after_greeting)
     for phrase in s.must_not_say:

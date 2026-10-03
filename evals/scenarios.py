@@ -33,6 +33,8 @@ class Scenario:
     expect_completed: bool = True
     must_say: list[str] = field(default_factory=list)       # each must appear in some reply
     must_not_say: list[str] = field(default_factory=list)   # none may appear in any reply
+    first_line: str | None = None   # scripted first caller line (else the caller LLM writes it)
+    min_caller_turns: int = 0   # catches a simulated caller that skips the part we're testing
 
 
 SCENARIOS = [
@@ -82,11 +84,14 @@ SCENARIOS = [
     ),
     Scenario(
         id="correction_at_readback",
-        persona="You are Tom. First say you're calling about the invoice. When the "
-                "assistant reads your details back, correct it: it's actually about the "
-                "quote, not the invoice. Then confirm.",
+        # The caller model kept correcting itself in its first line, before
+        # any read-back. A scripted first line makes the test deterministic.
+        first_line="Hi, this is Tom. I'm calling about the invoice.",
+        persona="You are Tom. You told the assistant you're calling about the invoice, but "
+                "you got it wrong: it's actually about the quote. When the assistant reads "
+                "your details back, correct it. Then confirm.",
         expect_name="Tom", expect_reason_keywords=["quote"],
-        must_not_say=[],
+        min_caller_turns=3,   # say invoice, correct at read-back, confirm
     ),
     Scenario(
         id="known_contact_note",
