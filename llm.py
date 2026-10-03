@@ -159,6 +159,12 @@ class Conversation:
                 f"\nSet identity_confirmed to true only when the caller clearly confirms "
                 f"they are {known_name}. Otherwise keep it false.\n"
             )
+        # If the caller turns out to be someone else, the history is swapped
+        # out for this, so the model can't leak what it no longer sees.
+        self._prompt_for_stranger = SYSTEM_PROMPT + (
+            "\nThis caller is a new caller. You have no information about any other "
+            "person, so never discuss anyone else's calls, plans or appointments.\n"
+        )
         # What MUST be asked. With caller ID, the callback defaults to that
         # number (they can still offer another). Hidden number: we must ask.
         self._has_caller_id = caller_number.startswith("+")
@@ -187,6 +193,8 @@ class Conversation:
         self.known_name = known_name
         self._shareable_notes = shareable_notes or []
         self.identity_confirmed = False
+        self.identity_denied = False   # caller said they're someone else: permanent for this call
+        self._honesty_prefix = ""      # set when the caller asks if they're talking to a person
         self.delivered_note_ids: list[int] = []
 
     def _status_note(self) -> str:
@@ -210,26 +218,11 @@ class Conversation:
         self.messages.append({"role": "user", "content": caller_text})
         self.transcript.append(("caller", caller_text))
         self._caller_turns += 1
+        asked_if_ai = "?" in caller_text and AI_QUESTION.search(caller_text)
+        self._honesty_prefix = HONESTY_LINE if asked_if_ai else ""
 
-        # The status note is added for this request only, never stored in
-        # history, so the model always sees the CURRENT status, not old ones.
-        response = await chat(
-            messages=self.messages + [{"role": "system", "content": self._status_note()}],
-            # Structured output: Ollama forces the reply to match this JSON schema
-            format=TurnOutput.model_json_schema(),
-            options={
-                "temperature": 0.3,   # some variety, without getting sloppy at extracting details
-                "num_predict": 200,   # hard cap on output length (tokens)
-            },
-        )
-        raw = response["message"]["content"]
-        _print_llm_stats(response)
-
-        try:
-            turn = TurnOutput.model_validate_json(raw)
-        except ValidationError:
-            # Rare with a schema, but never crash a live call over bad output
-            print(f"LLM returned invalid output: {raw}")
+        turn = await self._ask_model()
+        if turn is None:
             return self._said("Sorry, could you say that again?"), False
 
         # The history gets what the assistant actually SAID (see _said), as
@@ -243,11 +236,30 @@ class Conversation:
         # confirmation, whatever the model says. Checked in code, because a
         # message delivered with confident wrong details is worse than none.
         disagreed = bool(DISAGREEMENT.search(caller_text))
-
-        # 1. Read-back confirmed: done.
-        if (self._read_back_done and turn.caller_confirmed and not disagreed
-                and self.details == self._read_back_snapshot):
+        matches_read_back = self._read_back_done and self.details == self._read_back_snapshot
+        # "Yes" to the read-back = the details are confirmed (completed), even
+        # if they tack on a question. "Yeah, but..." is not a yes.
+        if (matches_read_back and turn.caller_confirmed and not disagreed
+                and not YES_BUT.search(caller_text)):
             self.completed = True
+
+        # Identity is a safety decision, so code makes it, not the model alone.
+        if self.known_name and not self.identity_confirmed and not self.identity_denied:
+            self._check_identity(turn, disagreed)
+            if self.identity_denied:
+                # The reply we just got was written while the model could still
+                # see the history (that's how "Sara called about the interview"
+                # leaked). Throw it away and ask again without the history.
+                retry = await self._ask_model()
+                if retry is None:   # never fall back to the leaky reply
+                    return self._said("Sorry about that. What can I help you with today?"), False
+                turn = retry
+                self._merge(turn)
+
+        # 1. Details confirmed and nothing left to answer: say goodbye.
+        #    If they asked something ("is there a confirmation number?"),
+        #    answer it first (step 5); the goodbye comes on a later turn.
+        if self.completed and matches_read_back and not disagreed and "?" not in caller_text:
             first_name = self.details.name.split()[0]
             return self._said(random.choice([
                 f"Perfect, I'll make sure {settings.owner_name} gets this. Thanks {first_name}, bye now.",
@@ -258,6 +270,7 @@ class Conversation:
         # 1b. They said the read-back was wrong, but nothing changed: the model
         #     missed the correction. Ask plainly instead of carrying on.
         if self._read_back_done and disagreed and self.details == self._read_back_snapshot:
+            self.completed = False   # an earlier "yes" no longer stands
             return self._said(random.choice([
                 "Sorry about that. What should I change?",
                 "Oh, sorry. What did I get wrong?",
@@ -270,31 +283,76 @@ class Conversation:
                 f"No problem, I'll pass on your message to {settings.owner_name}. Goodbye."
             ), True
 
-        # 3. All details known, and not yet read back in this exact form
+        # 3. Identity confirmed by code: pass on shareable notes, word for word,
+        #    once each, then carry on with what the model wanted to say.
+        if self.identity_confirmed:
+            pending = [(i, t) for i, t in self._shareable_notes if i not in self.delivered_note_ids]
+            if pending:
+                self.delivered_note_ids.extend(i for i, _ in pending)
+                notes = " ".join(_as_sentence(t) for _, t in pending)
+                return self._said(
+                    f"{settings.owner_name} asked me to pass on a message: {notes} {turn.reply}"
+                ), False
+
+        # 4. All details known, and not yet read back in this exact form
         #    (first time, or the caller just corrected something): our code
         #    writes the read-back itself, so it always contains every detail.
         if not self.details.missing(self._required):
             self._fill_defaults()
         if not self.details.missing(self._required) and self.details != self._read_back_snapshot:
             self._read_back_done = True
+            self.completed = False   # new details: they need confirming again
             self._corrections_allowed = True
             self._read_back_snapshot = self.details.model_copy()
             self._last_read_back = self._read_back_text()
             return self._said(self._last_read_back), False
 
-        # 4. The caller just confirmed they're the known contact: pass on
-        #    any shareable notes, word for word, then carry on.
-        if turn.identity_confirmed and self.known_name and not self.identity_confirmed:
-            self.identity_confirmed = True
-            pending = [(i, t) for i, t in self._shareable_notes if i not in self.delivered_note_ids]
-            if pending:
-                self.delivered_note_ids.extend(i for i, _ in pending)
-                messages = " ".join(_as_sentence(t) for _, t in pending)
-                return self._said(
-                    f"{settings.owner_name} asked me to pass on a message: {messages} {turn.reply}"
-                ), False
-
         return self._said(turn.reply), False
+
+    async def _ask_model(self) -> TurnOutput | None:
+        """One model call with the current history. None if the output was unusable."""
+        # The status note is added for this request only, never stored in
+        # history, so the model always sees the CURRENT status, not old ones.
+        response = await chat(
+            messages=self.messages + [{"role": "system", "content": self._status_note()}],
+            # Structured output: Ollama forces the reply to match this JSON schema
+            format=TurnOutput.model_json_schema(),
+            options={
+                "temperature": 0.3,   # some variety, without getting sloppy at extracting details
+                "num_predict": 200,   # hard cap on output length (tokens)
+            },
+        )
+        raw = response["message"]["content"]
+        _print_llm_stats(response)
+        try:
+            return TurnOutput.model_validate_json(raw)
+        except ValidationError:
+            # Rare with a schema, but never crash a live call over bad output
+            print(f"LLM returned invalid output: {raw}")
+            return None
+
+    def _check_identity(self, turn: TurnOutput, disagreed: bool) -> None:
+        """Decide whether the caller is the known contact.
+
+        Denied (for the rest of the call) if they disagree when first asked,
+        or give a different name. Confirmed only if the model says so AND
+        the caller didn't disagree in that same message.
+        """
+        known_first = self.known_name.split()[0].lower()
+        gave_other_name = bool(self.details.name) and known_first not in self.details.name.lower()
+
+        if (self._caller_turns == 1 and disagreed) or gave_other_name:
+            self.identity_denied = True
+            # Take the caller history out of the model's view entirely
+            self.messages[0]["content"] = self._prompt_for_stranger
+            print(f"  identity DENIED: caller is not {self.known_name}. History removed from prompt.")
+            return
+
+        if turn.identity_confirmed and not disagreed:
+            self.identity_confirmed = True
+            if not self.details.name:
+                self.details.name = self.known_name   # they just confirmed it
+            print(f"  identity confirmed: {self.known_name}")
 
     def _fill_defaults(self) -> None:
         """Details we don't ask for get sensible defaults. The read-back
@@ -322,6 +380,9 @@ class Conversation:
 
     def _said(self, text: str) -> str:
         """Record what the assistant is about to say, and pass it through."""
+        if self._honesty_prefix and not re.search(r"\bAI\b", text):
+            text = self._honesty_prefix + text
+        self._honesty_prefix = ""
         self.transcript.append(("assistant", text))
         self.messages.append({"role": "assistant", "content": text})
         return text
@@ -368,6 +429,18 @@ class Conversation:
 
 
 # Signs the caller is disagreeing or correcting, not confirming
+# "Am I talking to a real person?" must always get a straight answer, even
+# when our code replaces the model's reply (read-back, notes, goodbye).
+AI_QUESTION = re.compile(
+    r"\b(real person|(a|an) (real )?(human|person|robot|bot|machine|ai)|"
+    r"are you (human|real|a robot|a bot|ai|an ai)|automated)\b",
+    re.IGNORECASE,
+)
+HONESTY_LINE = "No, I'm an AI assistant, not a person. "
+
+# "Yeah, but can you...?" is not a clean yes. Neither is a yes with a question.
+YES_BUT = re.compile(r"^\W*(yes|yeah|yep|sure|okay|ok|right)\b\W*but\b", re.IGNORECASE)
+
 DISAGREEMENT = re.compile(
     r"^\W*(no|nope|nah|not|wrong|incorrect|actually|wait|hold on)\b"
     r"|\b(not right|not correct|that's wrong|that is wrong|isn't right|is not right)\b",
@@ -399,10 +472,26 @@ def _normalize_phone(value: str) -> str:
 def _clean_reason(reason: str) -> str:
     """'calling regarding the interview' -> 'the interview', so the read-back
     doesn't say 'calling about calling regarding ...'."""
-    return re.sub(
+    cleaned = re.sub(
         r"^(i'?m\s+)?(calling\s+)?(about|regarding|re|for|because of)\s+",
         "", reason.strip(), flags=re.IGNORECASE,
     ) or reason
+    # "make a dinner reservation" -> "making a dinner reservation", so
+    # "calling about ..." stays grammatical
+    cleaned = re.sub(r"^(wants? to|wanting to|to)\s+", "", cleaned, flags=re.IGNORECASE)
+    first, _, rest = cleaned.partition(" ")
+    gerund = GERUNDS.get(first.lower())
+    return f"{gerund} {rest}".strip() if gerund else cleaned
+
+
+GERUNDS = {
+    "make": "making", "book": "booking", "check": "checking", "ask": "asking",
+    "talk": "talking", "discuss": "discussing", "schedule": "scheduling",
+    "reschedule": "rescheduling", "confirm": "confirming", "cancel": "cancelling",
+    "change": "changing", "get": "getting", "set": "setting", "follow": "following",
+    "see": "seeing", "find": "finding", "sell": "selling", "buy": "buying",
+    "pick": "picking", "drop": "dropping", "return": "returning", "pay": "paying",
+}
 
 
 def _as_sentence(text: str) -> str:
