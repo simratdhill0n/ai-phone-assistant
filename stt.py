@@ -29,17 +29,32 @@ def _add_nvidia_dll_dirs() -> None:
             os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
 
 
-_add_nvidia_dll_dirs()
-from faster_whisper import WhisperModel  # noqa: E402  (must come after the DLL setup)
+# The model starts empty. load_stt() fills it, called once from the server's
+# startup (lifespan). Importing this file stays cheap: no GPU memory used,
+# no files read, so tests and tools can import it freely.
+_model = None
 
-# Loaded once at startup.
-#   GPU: device="cuda", compute_type="float16"
-#   CPU: device="cpu",  compute_type="int8"
-model = WhisperModel(
-    settings.whisper_model,
-    device=settings.whisper_device,
-    compute_type=settings.whisper_compute_type,
-)
+
+def load_stt() -> None:
+    """Load Whisper. Called once at server startup."""
+    global _model
+    if _model is not None:
+        return   # already loaded
+    _add_nvidia_dll_dirs()
+    from faster_whisper import WhisperModel   # imported here, after the DLL setup
+    #   GPU: device="cuda", compute_type="float16"
+    #   CPU: device="cpu",  compute_type="int8"
+    _model = WhisperModel(
+        settings.whisper_model,
+        device=settings.whisper_device,
+        compute_type=settings.whisper_compute_type,
+    )
+
+
+def _require_model():
+    if _model is None:
+        raise RuntimeError("Speech-to-text model not loaded. Call load_stt() at startup.")
+    return _model
 
 
 def transcribe(pcm_8k: bytes, hints: str = "") -> str:
@@ -56,7 +71,7 @@ def transcribe(pcm_8k: bytes, hints: str = "") -> str:
     samples = np.frombuffer(pcm_16k, dtype=np.int16).astype(np.float32) / 32768.0
 
     # 3. Transcribe. The work actually happens while looping over segments.
-    segments, _ = model.transcribe(
+    segments, _ = _require_model().transcribe(
         samples,
         beam_size=5,
         language="en",                      # skip language detection, saves time
@@ -83,5 +98,5 @@ def _simplify(text: str) -> str:
 def warm_up_stt() -> None:
     """Run one tiny transcription at startup. The first GPU run is slow
     (CUDA setup), so do it before any caller is waiting."""
-    segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="en")
+    segments, _ = _require_model().transcribe(np.zeros(16000, dtype=np.float32), language="en")
     list(segments)   # segments is lazy: consume it so the work actually runs

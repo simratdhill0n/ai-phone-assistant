@@ -16,20 +16,28 @@ from llm import Conversation, warm_up
 from memory import build_caller_context
 from notes import handle_owner_sms
 from sms import notify_owner
-from stt import transcribe, warm_up_stt
-from tts import split_sentences, synthesize, warm_up_tts
+from stt import load_stt, transcribe, warm_up_stt
+from tts import load_tts, split_sentences, synthesize, warm_up_tts
 from twilio_security import verify_twilio
 from vad import create_vad
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Code before "yield" runs once at startup, code after it at shutdown
+    """Runs once when the server starts (before yield) and once when it
+    stops (after yield). Everything heavy happens here, not at import time,
+    so a plain `import main` never loads a model."""
     init_db()
+
+    # Loading models blocks for seconds, so do it in threads.
+    await asyncio.to_thread(load_stt)
     await asyncio.to_thread(warm_up_stt)
     print("Speech-to-text ready.")
+
+    await asyncio.to_thread(load_tts)
     await asyncio.to_thread(warm_up_tts)
     print(f"Text-to-speech ready ({settings.tts_engine}).")
+
     try:
         await warm_up()
         print("LLM loaded and ready.")
