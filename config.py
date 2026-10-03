@@ -49,5 +49,7 @@ class Settings(BaseSettings):
     kokoro_device: str = "cuda"
     piper_voice_path: str = ""
 
+    vad_engine: Literal["silero", "energy"] = "silero"
+
 
 settings = Settings()

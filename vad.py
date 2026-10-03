@@ -52,6 +52,15 @@ class VoiceActivityDetector:
         self._utterance = bytearray()
         self._trailing_bytes = 0    # silence at the end of the utterance
 
+    @property
+    def speech_ms(self) -> int:
+        """How long the current utterance has lasted so far, in milliseconds.
+        0 when the caller isn't speaking. Lets main.py react to speech while
+        it's still happening (barge-in), not only once it ends."""
+        if self.state != SPEAKING:
+            return 0
+        return len(self._utterance) // 320 * 20   # 320 bytes = one 20 ms frame
+
     def process(self, pcm: bytes) -> bytes | None:
         """Feed one frame. Returns the utterance audio when speech ends,
         otherwise None."""

@@ -38,6 +38,11 @@ class CallRecorder:
         if not self._closed:
             self._assistant_pending.extend(pcm)
 
+    def clear_assistant_audio(self) -> None:
+        """The caller interrupted: Twilio threw away the rest of our audio,
+        so the recording should too, to match what was actually heard."""
+        self._assistant_pending.clear()
+
     def add_caller_audio(self, pcm: bytes) -> None:
         """Write one caller frame (16-bit PCM) plus matching assistant audio."""
         if self._closed:

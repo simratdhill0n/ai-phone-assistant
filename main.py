@@ -45,6 +45,17 @@ FRAME_BYTES_PCM = 320
 # 8000 samples/s * 2 bytes per sample
 PCM_BYTES_PER_SECOND = 16000
 
+# Barge-in: how long the caller must keep talking over the assistant before
+# it stops. Long enough that a quick "mhm" or a cough doesn't cut it off.
+BARGE_IN_MS = 400
+
+# Listening sounds people make while someone else talks. Not an answer,
+# so after one of these the assistant repeats what it was saying.
+FILLER_ONLY = re.compile(
+    r"^\W*(m+|h?m+h?m+|hmm+|uh+|um+|uh[\s-]*huh|ah+|oh+)(\W+(m+|h?m+h?m+|hmm+|uh+|um+|uh[\s-]*huh|ah+|oh+))*\W*$",
+    re.IGNORECASE,
+)
+
 GREETING = (
     f"Hi, you've reached the office of {settings.owner_name}. "
     f"I'm {settings.assistant_name}, his AI assistant, and this call may be recorded. "
@@ -98,6 +109,17 @@ async def send_audio(websocket: WebSocket, stream_sid: str, pcm: bytes, recorder
         })
 
 
+async def send_mark(websocket: WebSocket, stream_sid: str, name: str):
+    """Twilio sends this mark back once the caller has HEARD everything we
+    sent before it. That's how we know when the assistant stops talking."""
+    await websocket.send_json({"event": "mark", "streamSid": stream_sid, "mark": {"name": name}})
+
+
+async def clear_audio(websocket: WebSocket, stream_sid: str):
+    """Tell Twilio to throw away any of our audio it hasn't played yet."""
+    await websocket.send_json({"event": "clear", "streamSid": stream_sid})
+
+
 async def say(websocket: WebSocket, stream_sid: str, text: str, recorder: CallRecorder) -> float:
     """Speak text to the caller. Returns how long the audio lasts, in seconds."""
     speech = await asyncio.to_thread(synthesize, text)
@@ -119,7 +141,13 @@ async def media_stream(websocket: WebSocket):
     caller_number = ""
     started_at = utcnow()
     stt_hints = ""
-    speaking_until = 0.0   # time.monotonic() when the assistant's audio ends
+    # Playback state. "playing" is True from sending a reply until Twilio
+    # echoes its mark back (= the caller heard the end of it).
+    playing = False
+    interruptible = False   # greeting and goodbye can't be interrupted
+    mark_count = 0
+    barged_in = False        # caller cut in, not yet sure it was a real answer
+    last_reply = ""          # what the assistant last said, to repeat after a filler
     private_notes: list[str] = []
     note_texts: dict[int, str] = {}
 
@@ -166,8 +194,12 @@ async def media_stream(websocket: WebSocket):
                     print(f"Known caller.{caller_context}")
                 print(f"Recording started. Saving to {recorder.path}")
 
-                duration = await say(websocket, stream_sid, greeting, recorder)
-                speaking_until = time.monotonic() + duration
+                await say(websocket, stream_sid, greeting, recorder)
+                # The greeting includes the AI and recording disclosure,
+                # so the caller can't talk over it.
+                mark_count += 1
+                await send_mark(websocket, stream_sid, f"m{mark_count}")
+                playing, interruptible = True, False
 
             elif event == "media":
                 payload = packet.get("media", {}).get("payload")
@@ -179,15 +211,24 @@ async def media_stream(websocket: WebSocket):
                 recorder.add_caller_audio(pcm_data)
 
                 utterance = vad.process(pcm_data)
+
+                # Barge-in: the caller has been talking over the assistant
+                # long enough to mean it. Stop talking and listen.
+                if playing and interruptible and vad.speech_ms >= BARGE_IN_MS:
+                    await clear_audio(websocket, stream_sid)
+                    recorder.clear_assistant_audio()
+                    playing = False
+                    barged_in = True   # decided after transcription: real answer or just "mm"?
+                    print("Caller interrupted. Assistant stopped talking.")
+
                 if not utterance:
                     continue
 
-                # Did the caller start talking while the assistant was still
-                # speaking? (A "mhm" or "yeah" over our audio.) Without
-                # barge-in support yet, we ignore those.
-                spoke_at = time.monotonic() - len(utterance) / PCM_BYTES_PER_SECOND
-                if spoke_at < speaking_until:
-                    print("Ignored speech that overlapped the assistant.")
+                # Speech that ended while the assistant was STILL talking was
+                # short enough not to trigger barge-in: a "mhm", a cough, or
+                # speech during the greeting. Not a real turn, so skip it.
+                if playing:
+                    print("Ignored short speech over the assistant.")
                     continue
 
                 # 1. Speech to text
@@ -198,7 +239,28 @@ async def media_stream(websocket: WebSocket):
                 # No letters or digits at all means nothing real was said.
                 if not re.search(r"[A-Za-z0-9]", text):
                     print(f"Ignored non-speech transcript: {text!r}")
+                    if barged_in:
+                        # The cut-in was just noise: carry on with what we were saying
+                        barged_in = False
+                        await say(websocket, stream_sid, last_reply, recorder)
+                        mark_count += 1
+                        await send_mark(websocket, stream_sid, f"m{mark_count}")
+                        playing, interruptible = True, True
                     continue
+
+                if barged_in:
+                    barged_in = False
+                    if FILLER_ONLY.match(text):
+                        # "Mm" / "mhm" means "go on", not "stop": repeat the reply
+                        print(f"Cut-in was just a listening sound ({text!r}). Repeating.")
+                        await say(websocket, stream_sid, last_reply, recorder)
+                        mark_count += 1
+                        await send_mark(websocket, stream_sid, f"m{mark_count}")
+                        playing, interruptible = True, True
+                        continue
+                    # A real answer: now we know the caller didn't hear it all
+                    conversation.mark_interrupted()
+
                 print(f"Caller said: {text}")
 
                 # 2. LLM decides the reply
@@ -207,7 +269,10 @@ async def media_stream(websocket: WebSocket):
 
                 # 3. Text to speech, sent to the caller
                 duration = await say(websocket, stream_sid, reply, recorder)
-                speaking_until = time.monotonic() + duration
+                last_reply = reply
+                mark_count += 1
+                await send_mark(websocket, stream_sid, f"m{mark_count}")
+                playing, interruptible = True, not end_call   # goodbye can't be interrupted
                 t3 = time.perf_counter()
                 print(f"  timing: stt {t1 - t0:.2f}s | llm {t2 - t1:.2f}s | tts+send {t3 - t2:.2f}s")
 
@@ -218,6 +283,11 @@ async def media_stream(websocket: WebSocket):
                     print("Assistant ended the call.")
                     await websocket.close()
                     break
+
+            elif event == "mark":
+                # Only the LATEST mark means "finished talking"
+                if packet.get("mark", {}).get("name") == f"m{mark_count}":
+                    playing = False
 
             elif event == "stop":
                 print("Twilio sent stop event.")

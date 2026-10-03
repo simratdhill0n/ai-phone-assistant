@@ -1,10 +1,14 @@
 """The conversation brain: talks to a local LLM through Ollama.
 
-The LLM returns structured JSON every turn: the details it has collected so
-far, plus what to say next. Our code tracks progress, tells the model what
-to ask next, and decides when the call ends.
+The LLM returns structured JSON every turn: any details the caller just gave,
+plus what to say next. Division of labour:
+  - our code decides WHAT must happen: what's collected, what's safe to say,
+    when the details are confirmed, when the call ends.
+  - the model decides HOW to say it: wording, order, tone.
 """
 
+import random
+import re
 from typing import Literal
 
 from ollama import AsyncClient, ResponseError
@@ -12,14 +16,15 @@ from pydantic import BaseModel, ValidationError
 
 from config import settings
 
-REQUIRED_FIELDS = ("name", "reason", "urgency", "callback")
+# Every detail we store. Only some must be ASKED (see Conversation._required):
+# urgency is inferred, and the callback defaults to the caller ID.
+ALL_FIELDS = ("name", "reason", "urgency", "callback")
 
-# How to describe each missing detail when steering the model
-FIELD_QUESTIONS = {
+# How to describe a missing detail in the status note
+FIELD_DESCRIPTIONS = {
     "name": "the caller's name",
     "reason": "the reason for the call",
-    "urgency": "how urgent it is (low, normal or urgent)",
-    "callback": "the best number to call them back on",
+    "callback": "a number to call them back on (their caller ID is hidden)",
 }
 
 # Safety net: no call goes on forever, whatever the model does
@@ -45,43 +50,56 @@ class CallDetails(BaseModel):
     urgency: str | None = None
     callback: str | None = None
 
-    def is_complete(self) -> bool:
-        return all(getattr(self, field) for field in REQUIRED_FIELDS)
-
-    def missing(self) -> list[str]:
-        return [field for field in REQUIRED_FIELDS if not getattr(self, field)]
+    def missing(self, required: tuple[str, ...]) -> list[str]:
+        return [field for field in required if not getattr(self, field)]
 
 
 SYSTEM_PROMPT = f"""You are {settings.assistant_name}, the AI phone assistant for {settings.owner_name}.
 {settings.owner_name} is unavailable, and you are taking a message on a live phone call.
 You speak ONLY as the assistant. Never speak as the caller.
 
-Collect these details, one question at a time:
-- name: the caller's name
-- reason: why they are calling
-- urgency: "low", "normal" or "urgent"
-- callback: the best phone number or time to call them back
+How you sound: like a friendly, relaxed human receptionist. Warm and brief.
+- React to what the caller actually said, then move on. ("Ah, the interview, got it.")
+- Let the caller talk in any order. If they give several details at once, take them all.
+- Vary your wording. Don't start every reply with "Thank you" or the caller's name.
+  Use their name now and then, not every time.
+- One or two short sentences. Plain spoken language, no lists, markdown or emojis. It is read aloud.
 
-Every reply must be JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, reply.
+What you need for the message: the caller's NAME and the REASON for the call.
+- Don't ask how urgent it is. Only set urgency if the caller signals it:
+  "no rush", "whenever" = low. "Today", "soon" = normal. "ASAP", "emergency", "right away" = urgent.
+- Don't ask for a callback number unless the STATUS note says it's needed.
+  Only set callback if the caller offers a different number or a time to call.
+
+Each turn you get a STATUS note with what's known and what's missing. Use it, but in your own words.
+
+Every reply is JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, reply.
 - Only fill a detail the caller gave in their LATEST message. Use null for everything else,
-  including details you already know (the STATUS note lists those, our system remembers them).
-- Never guess.
-- Callers rarely say "low", "normal" or "urgent". Map what they mean: "no rush", "whenever", "it's okay" = low. "Soon", "today" = normal. "ASAP", "emergency", "right away" = urgent.
-- Sounds like "mhm", "yeah" or "uh huh" on their own are not answers or confirmations.
+  including details you already know (our system remembers them).
+- Never guess. "Mhm", "yeah" or "uh huh" on their own are not answers.
+- "reason": a short phrase like "the interview on Monday", not "calling about the interview".
+- caller_confirmed: true only when the caller has just agreed that the details read back to them are right.
+- caller_wants_to_end: true when the caller says goodbye or clearly wants to hang up.
+- If the caller corrects something, fill in the corrected value.
 - "reply" is what you say out loud next.
-- Set caller_confirmed to true only when the caller has just said the read-back details are correct.
-- Set caller_wants_to_end to true when the caller says goodbye or clearly wants to end the call.
-- If the caller corrects something, update the detail.
-- Each turn you will get a STATUS note saying what is still needed. Follow it.
 
-Rules for "reply":
-- You are speaking on the phone. One or two short sentences, plain spoken language.
-- No lists, markdown, emojis or special characters. It is read aloud.
-- Ask only one question at a time. Never ask again for something you already know.
+Limits:
 - You cannot call anyone back or help with their request yourself. Never say you will.
   You only take a message and pass it to {settings.owner_name}.
 - Never share personal information about {settings.owner_name}, and never promise what he will do.
 - If asked, say honestly that you are an AI assistant.
+
+Two examples of the tone (the names here are made up, never reuse them):
+
+Caller: Hey, it's Priya, I'm calling about the invoice I sent last week.
+You: Hi Priya, sure, the invoice from last week. Is there anything you'd like me to pass on about it?
+Caller: Just that it's due Friday.
+You: Got it, due Friday.
+
+Caller: Hi, is Simrat there?
+You: He's not available right now, but I can take a message. Who's calling?
+Caller: Marcus.
+You: Thanks Marcus, and what's it about?
 """
 
 client = AsyncClient()  # connects to the Ollama server at http://localhost:11434
@@ -141,16 +159,10 @@ class Conversation:
                 f"\nSet identity_confirmed to true only when the caller clearly confirms "
                 f"they are {known_name}. Otherwise keep it false.\n"
             )
-        if caller_number.startswith("+"):
-            # A real number: let the assistant offer it instead of asking cold.
-            system_prompt += (
-                f"\nThe caller is calling from {caller_number}. For callback, ask if "
-                "this number is the best one to reach them, instead of asking for a number. "
-                "If they say yes, set callback to this number.\n"
-            )
-        else:
-            # Blocked or unknown caller ID: the assistant has to ask.
-            system_prompt += "\nThe caller's number is hidden, so ask for a callback number.\n"
+        # What MUST be asked. With caller ID, the callback defaults to that
+        # number (they can still offer another). Hidden number: we must ask.
+        self._has_caller_id = caller_number.startswith("+")
+        self._required = ("name", "reason") if self._has_caller_id else ("name", "reason", "callback")
 
         self.messages = [
             {"role": "system", "content": system_prompt},
@@ -165,6 +177,10 @@ class Conversation:
         self._read_back_done = False   # have we read the details back to the caller?
         self._read_back_snapshot: CallDetails | None = None   # details as last read back
         self._caller_turns = 0
+        self._last_read_back: str | None = None
+        # Once a read-back has STARTED, the caller may correct details,
+        # even if they interrupted it before the end.
+        self._corrections_allowed = False
 
         # Shareable notes: (note_id, text). The LLM never sees these. Our code
         # says them word for word, once the caller confirms who they are.
@@ -178,15 +194,12 @@ class Conversation:
         so the model doesn't have to work it out from the history."""
         known = {f: v for f, v in self.details.model_dump().items() if v}
         known_text = f"Known so far: {known}. " if known else ""
-        missing = self.details.missing()
+        missing = self.details.missing(self._required)
         if missing:
-            needed = ", ".join(FIELD_QUESTIONS[f] for f in missing)
-            return (
-                f"STATUS: {known_text}Still needed: {needed}. "
-                f"Unless the caller just gave it, ask for {FIELD_QUESTIONS[missing[0]]} next."
-            )
+            needed = ", ".join(FIELD_DESCRIPTIONS[f] for f in missing)
+            return f"STATUS: {known_text}Still missing: {needed}. Work it into the conversation naturally."
         if not self._read_back_done:
-            return f"STATUS: {known_text}All details collected."
+            return f"STATUS: {known_text}Everything needed is collected."
         return f"STATUS: {known_text}Details were read back. Set caller_confirmed only if the caller clearly agreed, or update what they corrected."
 
     async def reply(self, caller_text: str) -> tuple[str, bool]:
@@ -205,7 +218,7 @@ class Conversation:
             # Structured output: Ollama forces the reply to match this JSON schema
             format=TurnOutput.model_json_schema(),
             options={
-                "temperature": 0.2,
+                "temperature": 0.3,   # some variety, without getting sloppy at extracting details
                 "num_predict": 200,   # hard cap on output length (tokens)
             },
         )
@@ -226,14 +239,29 @@ class Conversation:
         self._merge(turn)
         print(f"  details so far: {self.details.model_dump()}")
 
+        # A reply that opens with "no", "wrong", "actually"... is never a
+        # confirmation, whatever the model says. Checked in code, because a
+        # message delivered with confident wrong details is worse than none.
+        disagreed = bool(DISAGREEMENT.search(caller_text))
+
         # 1. Read-back confirmed: done.
-        if self._read_back_done and turn.caller_confirmed and self.details == self._read_back_snapshot:
+        if (self._read_back_done and turn.caller_confirmed and not disagreed
+                and self.details == self._read_back_snapshot):
             self.completed = True
             first_name = self.details.name.split()[0]
-            return self._said(
-                f"Thanks {first_name}, I'll pass your message to {settings.owner_name}. "
-                "Have a great day, goodbye."
-            ), True
+            return self._said(random.choice([
+                f"Perfect, I'll make sure {settings.owner_name} gets this. Thanks {first_name}, bye now.",
+                f"Great, I'll pass that on to {settings.owner_name}. Have a good one, {first_name}.",
+                f"All set, {first_name}. I'll let {settings.owner_name} know. Take care.",
+            ])), True
+
+        # 1b. They said the read-back was wrong, but nothing changed: the model
+        #     missed the correction. Ask plainly instead of carrying on.
+        if self._read_back_done and disagreed and self.details == self._read_back_snapshot:
+            return self._said(random.choice([
+                "Sorry about that. What should I change?",
+                "Oh, sorry. What did I get wrong?",
+            ])), False
 
         # 2. Caller wants to go, or the call has gone on too long: wrap up
         #    politely with whatever we have.
@@ -245,10 +273,14 @@ class Conversation:
         # 3. All details known, and not yet read back in this exact form
         #    (first time, or the caller just corrected something): our code
         #    writes the read-back itself, so it always contains every detail.
-        if self.details.is_complete() and self.details != self._read_back_snapshot:
+        if not self.details.missing(self._required):
+            self._fill_defaults()
+        if not self.details.missing(self._required) and self.details != self._read_back_snapshot:
             self._read_back_done = True
+            self._corrections_allowed = True
             self._read_back_snapshot = self.details.model_copy()
-            return self._said(self._read_back_text()), False
+            self._last_read_back = self._read_back_text()
+            return self._said(self._last_read_back), False
 
         # 4. The caller just confirmed they're the known contact: pass on
         #    any shareable notes, word for word, then carry on.
@@ -264,23 +296,52 @@ class Conversation:
 
         return self._said(turn.reply), False
 
+    def _fill_defaults(self) -> None:
+        """Details we don't ask for get sensible defaults. The read-back
+        still mentions them, so the caller can correct either one."""
+        if not self.details.urgency:
+            self.details.urgency = "normal"
+        if not self.details.callback and self._has_caller_id:
+            self.details.callback = self.caller_number
+
     def _read_back_text(self) -> str:
+        """Our code writes the read-back, so it always contains every detail
+        correctly. Varied wording keeps it from sounding like a form."""
         d = self.details
+        reason = _clean_reason(d.reason)
+        urgency = {"urgent": ", and it's urgent", "low": ", no rush"}.get(d.urgency, "")
         if d.callback == self.caller_number:
-            callback = "and the best number to reach you is the one you're calling from"
+            callback = f"{settings.owner_name} can call you back on this number"
         else:
-            callback = f"and the best way to reach you is {d.callback}"
-        return (
-            f"Let me make sure I have this right. Your name is {d.name}, "
-            f"you're calling about {d.reason}, it's {d.urgency} urgency, "
-            f"{callback}. Is that correct?"
-        )
+            callback = f"{settings.owner_name} can reach you at {d.callback}"
+        return random.choice([
+            f"Okay, just to confirm: {d.name}, about {reason}{urgency}, and {callback}. Did I get that right?",
+            f"Got it. So that's {d.name}, calling about {reason}{urgency}, and {callback}. Is that right?",
+            f"Alright, let me read that back. {d.name}, {reason}{urgency}, and {callback}. Sound good?",
+        ])
 
     def _said(self, text: str) -> str:
         """Record what the assistant is about to say, and pass it through."""
         self.transcript.append(("assistant", text))
         self.messages.append({"role": "assistant", "content": text})
         return text
+
+    def mark_interrupted(self) -> None:
+        """The caller talked over the last reply, so they may not have heard
+        all of it. Note that in the history, so the model doesn't assume
+        its whole question landed."""
+        for message in reversed(self.messages):
+            if message["role"] == "assistant":
+                # If the cut-off reply was the read-back, the caller never
+                # heard it all, so it doesn't count. Read back again next turn.
+                if message["content"] == self._last_read_back:
+                    self._read_back_done = False
+                    self._read_back_snapshot = None
+                message["content"] += " (the caller cut in here)"
+                break
+        if self.transcript and self.transcript[-1][0] == "assistant":
+            speaker, text = self.transcript[-1]
+            self.transcript[-1] = (speaker, text + " [interrupted]")
 
     def _merge(self, turn: TurnOutput) -> None:
         """Update details with anything new.
@@ -291,16 +352,27 @@ class Conversation:
         - After the read-back, corrections are allowed. Any change triggers
           a fresh read-back, so the caller always confirms the final version.
         """
-        for field in REQUIRED_FIELDS:
+        for field in ALL_FIELDS:
             value = getattr(turn, field)
             if not is_real_value(value):
                 continue
+            value = value.strip()
+            if field == "callback":
+                value = _normalize_phone(value)
             current = getattr(self.details, field)
-            if current and not self._read_back_done:
-                if value.strip() != current:
+            if current and not self._corrections_allowed:
+                if value != current:
                     print(f"  ignored change to {field}: {current!r} -> {value!r} (locked until read-back)")
                 continue
-            setattr(self.details, field, value.strip())
+            setattr(self.details, field, value)
+
+
+# Signs the caller is disagreeing or correcting, not confirming
+DISAGREEMENT = re.compile(
+    r"^\W*(no|nope|nah|not|wrong|incorrect|actually|wait|hold on)\b"
+    r"|\b(not right|not correct|that's wrong|that is wrong|isn't right|is not right)\b",
+    re.IGNORECASE,
+)
 
 
 # Small models sometimes write the WORD "null" instead of a JSON null.
@@ -310,6 +382,27 @@ PLACEHOLDERS = {"null", "none", "unknown", "n/a", "na", "not given", "not provid
 
 def is_real_value(value: str | None) -> bool:
     return value is not None and value.strip().lower() not in PLACEHOLDERS
+
+
+def _normalize_phone(value: str) -> str:
+    """'548-577-1772' and '+15485771772' are the same number: store both as
+    +15485771772. Anything that isn't a North American number (a time, an
+    email, "evenings") is kept as the caller said it."""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return value
+
+
+def _clean_reason(reason: str) -> str:
+    """'calling regarding the interview' -> 'the interview', so the read-back
+    doesn't say 'calling about calling regarding ...'."""
+    return re.sub(
+        r"^(i'?m\s+)?(calling\s+)?(about|regarding|re|for|because of)\s+",
+        "", reason.strip(), flags=re.IGNORECASE,
+    ) or reason
 
 
 def _as_sentence(text: str) -> str:
