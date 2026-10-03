@@ -104,6 +104,23 @@ def synthesize(text: str) -> bytes:
     return pcm_8k
 
 
+def split_sentences(text: str) -> list[str]:
+    """Split a reply into sentences, so the first can play while the rest
+    are still being generated. 'Got it. What's your name?' -> two pieces."""
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        # Glue tiny fragments (like a stray "Ok.") onto the previous sentence
+        if sentences and len(part) < 4:
+            sentences[-1] += " " + part
+        else:
+            sentences.append(part)
+    return sentences
+
+
 def warm_up_tts() -> None:
     """Synthesize one short phrase at startup. The first run on the GPU is
     slow (setup), so do it before any caller is waiting."""

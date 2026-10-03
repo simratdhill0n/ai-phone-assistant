@@ -17,9 +17,9 @@ from memory import build_caller_context
 from notes import handle_owner_sms
 from sms import notify_owner
 from stt import transcribe, warm_up_stt
-from tts import synthesize, warm_up_tts
+from tts import split_sentences, synthesize, warm_up_tts
 from twilio_security import verify_twilio
-from vad import VoiceActivityDetector
+from vad import create_vad
 
 
 @asynccontextmanager
@@ -120,14 +120,6 @@ async def clear_audio(websocket: WebSocket, stream_sid: str):
     await websocket.send_json({"event": "clear", "streamSid": stream_sid})
 
 
-async def say(websocket: WebSocket, stream_sid: str, text: str, recorder: CallRecorder) -> float:
-    """Speak text to the caller. Returns how long the audio lasts, in seconds."""
-    speech = await asyncio.to_thread(synthesize, text)
-    await send_audio(websocket, stream_sid, speech, recorder)
-    print(f"Assistant said: {text}")
-    return len(speech) / PCM_BYTES_PER_SECOND
-
-
 @app.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
     await websocket.accept()
@@ -141,15 +133,52 @@ async def media_stream(websocket: WebSocket):
     caller_number = ""
     started_at = utcnow()
     stt_hints = ""
-    # Playback state. "playing" is True from sending a reply until Twilio
-    # echoes its mark back (= the caller heard the end of it).
+    # Playback state. "playing" is True from the moment the assistant starts
+    # a reply until Twilio echoes that reply's mark back (= the caller heard
+    # the end of it).
     playing = False
-    interruptible = False   # greeting and goodbye can't be interrupted
+    interruptible = False    # greeting and goodbye can't be interrupted
     mark_count = 0
     barged_in = False        # caller cut in, not yet sure it was a real answer
     last_reply = ""          # what the assistant last said, to repeat after a filler
+    hang_up_after_speaking = False
+    speak_task: asyncio.Task | None = None
     private_notes: list[str] = []
     note_texts: dict[int, str] = {}
+
+    async def speak(text: str, mark_name: str) -> None:
+        """Runs in the BACKGROUND: synthesize sentence by sentence and send
+        each one as soon as it's ready. The caller hears the first sentence
+        while the rest are still being generated, and the main loop keeps
+        listening the whole time (so barge-in can cancel this task)."""
+        try:
+            started = time.perf_counter()
+            first_audio = None
+            for sentence in split_sentences(text):
+                pcm = await asyncio.to_thread(synthesize, sentence)
+                if first_audio is None:
+                    first_audio = time.perf_counter() - started
+                await send_audio(websocket, stream_sid, pcm, recorder)
+            # Sent after the LAST sentence: Twilio echoes it once all of it was heard
+            await send_mark(websocket, stream_sid, mark_name)
+            print(f"Assistant said: {text}")
+            print(f"  tts: first audio after {first_audio or 0:.2f}s, "
+                  f"all sent after {time.perf_counter() - started:.2f}s")
+        except asyncio.CancelledError:
+            raise   # barge-in cancelled us: let the cancellation through
+        except Exception as e:
+            # A background task's errors are otherwise silent, so log them
+            print(f"Speaking failed: {e!r}")
+
+    def start_speaking(text: str, can_interrupt: bool = True) -> None:
+        """Begin a reply in the background and return immediately."""
+        nonlocal speak_task, playing, interruptible, mark_count, last_reply
+        # Reserve this reply's mark name NOW, so a late mark from an older
+        # reply can never be mistaken for this one finishing.
+        mark_count += 1
+        speak_task = asyncio.create_task(speak(text, f"m{mark_count}"))
+        playing, interruptible = True, can_interrupt
+        last_reply = text
 
     try:
         while True:
@@ -164,7 +193,7 @@ async def media_stream(websocket: WebSocket):
                 # Values we passed with <Parameter> arrive in customParameters
                 caller_number = start_data.get("customParameters", {}).get("caller_number", "")
                 recorder = CallRecorder(call_sid)
-                vad = VoiceActivityDetector()
+                vad = create_vad(settings.vad_engine)
 
                 # Caller memory: look up this number's history (database = blocking)
                 greeting, caller_context, known_name = await asyncio.to_thread(
@@ -194,12 +223,9 @@ async def media_stream(websocket: WebSocket):
                     print(f"Known caller.{caller_context}")
                 print(f"Recording started. Saving to {recorder.path}")
 
-                await say(websocket, stream_sid, greeting, recorder)
                 # The greeting includes the AI and recording disclosure,
                 # so the caller can't talk over it.
-                mark_count += 1
-                await send_mark(websocket, stream_sid, f"m{mark_count}")
-                playing, interruptible = True, False
+                start_speaking(greeting, can_interrupt=False)
 
             elif event == "media":
                 payload = packet.get("media", {}).get("payload")
@@ -215,7 +241,9 @@ async def media_stream(websocket: WebSocket):
                 # Barge-in: the caller has been talking over the assistant
                 # long enough to mean it. Stop talking and listen.
                 if playing and interruptible and vad.speech_ms >= BARGE_IN_MS:
-                    await clear_audio(websocket, stream_sid)
+                    if speak_task and not speak_task.done():
+                        speak_task.cancel()        # stop generating the rest
+                    await clear_audio(websocket, stream_sid)   # drop what's queued at Twilio
                     recorder.clear_assistant_audio()
                     playing = False
                     barged_in = True   # decided after transcription: real answer or just "mm"?
@@ -242,10 +270,7 @@ async def media_stream(websocket: WebSocket):
                     if barged_in:
                         # The cut-in was just noise: carry on with what we were saying
                         barged_in = False
-                        await say(websocket, stream_sid, last_reply, recorder)
-                        mark_count += 1
-                        await send_mark(websocket, stream_sid, f"m{mark_count}")
-                        playing, interruptible = True, True
+                        start_speaking(last_reply)
                     continue
 
                 if barged_in:
@@ -253,10 +278,7 @@ async def media_stream(websocket: WebSocket):
                     if FILLER_ONLY.match(text):
                         # "Mm" / "mhm" means "go on", not "stop": repeat the reply
                         print(f"Cut-in was just a listening sound ({text!r}). Repeating.")
-                        await say(websocket, stream_sid, last_reply, recorder)
-                        mark_count += 1
-                        await send_mark(websocket, stream_sid, f"m{mark_count}")
-                        playing, interruptible = True, True
+                        start_speaking(last_reply)
                         continue
                     # A real answer: now we know the caller didn't hear it all
                     conversation.mark_interrupted()
@@ -266,28 +288,22 @@ async def media_stream(websocket: WebSocket):
                 # 2. LLM decides the reply
                 reply, end_call = await conversation.reply(text)
                 t2 = time.perf_counter()
+                print(f"  timing: stt {t1 - t0:.2f}s | llm {t2 - t1:.2f}s")
 
-                # 3. Text to speech, sent to the caller
-                duration = await say(websocket, stream_sid, reply, recorder)
-                last_reply = reply
-                mark_count += 1
-                await send_mark(websocket, stream_sid, f"m{mark_count}")
-                playing, interruptible = True, not end_call   # goodbye can't be interrupted
-                t3 = time.perf_counter()
-                print(f"  timing: stt {t1 - t0:.2f}s | llm {t2 - t1:.2f}s | tts+send {t3 - t2:.2f}s")
-
+                # 3. Speak it, streaming, in the background. The goodbye can't be
+                #    interrupted, and we hang up once Twilio confirms it was heard.
+                start_speaking(reply, can_interrupt=not end_call)
                 if end_call:
-                    # Twilio plays our audio in real time, so wait for the
-                    # goodbye to finish before hanging up.
-                    await asyncio.sleep(duration + 0.5)
-                    print("Assistant ended the call.")
-                    await websocket.close()
-                    break
+                    hang_up_after_speaking = True
 
             elif event == "mark":
-                # Only the LATEST mark means "finished talking"
+                # Only the LATEST reply's mark means "finished talking"
                 if packet.get("mark", {}).get("name") == f"m{mark_count}":
                     playing = False
+                    if hang_up_after_speaking:
+                        print("Assistant ended the call.")
+                        await websocket.close()
+                        break
 
             elif event == "stop":
                 print("Twilio sent stop event.")
@@ -297,6 +313,10 @@ async def media_stream(websocket: WebSocket):
         print(f"WebSocket disconnected for CallSid: {call_sid}")
 
     finally:
+        # Don't leave a reply generating for a call that has ended
+        if speak_task and not speak_task.done():
+            speak_task.cancel()
+
         if recorder:
             recorder.close()
             print(f"Recording for {call_sid} saved to {recorder.path}")
