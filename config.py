@@ -51,5 +51,8 @@ class Settings(BaseSettings):
 
     vad_engine: Literal["silero", "energy"] = "silero"
 
+    transfer_enabled: bool = True
+    transfer_ring_seconds: int = 20
+
 
 settings = Settings()

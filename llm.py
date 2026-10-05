@@ -198,6 +198,7 @@ class Conversation:
         self.identity_confirmed = False
         self.identity_denied = False   # caller said they're someone else: permanent for this call
         self._honesty_prefix = ""      # set when the caller asks if they're talking to a person
+        self.wants_transfer = False    # urgent + confirmed: main.py dials the owner
         self.delivered_note_ids: list[int] = []
 
     def _status_note(self) -> str:
@@ -276,6 +277,14 @@ class Conversation:
         #    answer it first (step 5); the goodbye comes on a later turn.
         if self.completed and matches_read_back and not disagreed and "?" not in caller_text:
             first_name = self.details.name.split()[0]
+            # Urgent: instead of goodbye, try to put them through (main.py
+            # does the transfer once this line has been heard).
+            if settings.transfer_enabled and self.details.urgency == "urgent":
+                self.wants_transfer = True
+                return self._said(
+                    f"Since it's urgent, let me try to put you through to {settings.owner_name}. "
+                    "One moment."
+                ), True
             return self._said(random.choice([
                 f"Perfect, I'll make sure {settings.owner_name} gets this. Thanks {first_name}, bye now.",
                 f"Great, I'll pass that on to {settings.owner_name}. Have a good one, {first_name}.",

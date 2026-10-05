@@ -3,7 +3,9 @@ import audioop
 import base64
 import json
 import re
+import io
 import time
+import wave
 from contextlib import asynccontextmanager
 from html import escape
 
@@ -18,6 +20,7 @@ from notes import handle_owner_sms
 from sms import notify_owner
 from stt import load_stt, transcribe, warm_up_stt
 from tts import load_tts, split_sentences, synthesize, warm_up_tts
+from transfer import finish, get_whisper, mark_accepted, transfer_call, whisper_text
 from twilio_security import verify_twilio
 from vad import create_vad
 
@@ -38,6 +41,11 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(warm_up_tts)
     print(f"Text-to-speech ready ({settings.tts_engine}).")
 
+    # Said when a transfer fails. Twilio plays it with <Play>, after our
+    # stream has ended, so we make it now in the same voice as the rest.
+    pcm = await asyncio.to_thread(synthesize, TRANSFER_FAILED_TEXT)
+    AUDIO_FILES["transfer_failed"] = pcm_to_wav(pcm)
+
     try:
         await warm_up()
         print("LLM loaded and ready.")
@@ -47,6 +55,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+TRANSFER_FAILED_TEXT = (
+    f"Sorry, {settings.owner_name} couldn't pick up right now. "
+    "Your message has been passed on, and he'll get back to you as soon as he can. Goodbye."
+)
+AUDIO_FILES: dict[str, bytes] = {}   # name -> WAV bytes, served at /audio/<name>.wav
+
+
+def pcm_to_wav(pcm: bytes) -> bytes:
+    """8 kHz 16-bit mono PCM -> a WAV file in memory (a format Twilio can <Play>)."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8000)
+        wav.writeframes(pcm)
+    return buffer.getvalue()
 
 # 20 ms of phone audio: 160 samples * 2 bytes = 320 bytes of 16-bit PCM
 FRAME_BYTES_PCM = 320
@@ -309,6 +334,14 @@ async def media_stream(websocket: WebSocket):
                 if packet.get("mark", {}).get("name") == f"m{mark_count}":
                     playing = False
                     if hang_up_after_speaking:
+                        if conversation.wants_transfer:
+                            whisper = whisper_text(conversation.details, caller_number)
+                            if await transfer_call(call_sid, whisper):
+                                # Twilio now runs the <Dial> instead of our stream.
+                                # It will send "stop" and close the socket itself.
+                                hang_up_after_speaking = False
+                                continue
+                            # Twilio refused: just end the call. The SMS still goes out.
                         print("Assistant ended the call.")
                         await websocket.close()
                         break
@@ -393,3 +426,56 @@ async def sms_endpoint(request: Request):
     # Replying is just TwiML again: <Message> sends an SMS back to the sender
     twiml = f"<Response><Message>{escape(reply)}</Message></Response>"
     return Response(content=twiml, media_type="application/xml")
+
+
+# ---------- Call transfer (see transfer.py for the whole flow) ----------
+
+@app.post("/whisper", dependencies=[Depends(verify_twilio)])
+async def whisper_endpoint(request: Request):
+    """The owner picked up. Only THEY hear this, the caller hears ringing."""
+    form = await request.form()
+    text = escape(get_whisper(form.get("ParentCallSid", "")))
+    twiml = f"""<Response>
+        <Gather numDigits="1" timeout="6" action="https://{settings.public_host}/whisper-answer">
+            <Say>{text} Press 1 to take the call.</Say>
+        </Gather>
+        <Hangup/>
+    </Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/whisper-answer", dependencies=[Depends(verify_twilio)])
+async def whisper_answer_endpoint(request: Request):
+    """The owner pressed a key. An empty <Response> ends the whisper, and
+    Twilio joins the two calls. <Hangup/> here hangs up only the owner."""
+    form = await request.form()
+    if form.get("Digits") == "1":
+        mark_accepted(form.get("ParentCallSid", ""))
+        print("Owner accepted the transfer.")
+        return Response(content="<Response/>", media_type="application/xml")
+    return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
+
+
+@app.post("/transfer-result", dependencies=[Depends(verify_twilio)])
+async def transfer_result_endpoint(request: Request):
+    """Runs on the CALLER's call once the <Dial> is over: either the owner
+    talked to them and hung up, or the owner never took the call."""
+    form = await request.form()
+    taken = finish(form.get("CallSid", ""))
+    print(f"Transfer finished: {'owner took the call' if taken else 'owner did not answer'} "
+          f"(DialCallStatus={form.get('DialCallStatus')})")
+    if taken:
+        return Response(content="<Response><Hangup/></Response>", media_type="application/xml")
+    twiml = f"""<Response>
+        <Play>https://{settings.public_host}/audio/transfer_failed.wav</Play>
+        <Hangup/>
+    </Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.get("/audio/{name}.wav")
+def audio_file(name: str):
+    """Pre-made audio for Twilio's <Play>. Nothing private here, so no signature check."""
+    if name not in AUDIO_FILES:
+        return Response(status_code=404)
+    return Response(content=AUDIO_FILES[name], media_type="audio/wav")

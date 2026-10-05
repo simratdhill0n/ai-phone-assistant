@@ -241,3 +241,5 @@ recordings/
 models/
 
 evals/results/
+
+google-service-account.json
