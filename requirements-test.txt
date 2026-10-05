@@ -7,3 +7,4 @@ httpx
 google-auth
 tzdata
 pytest
+requests
