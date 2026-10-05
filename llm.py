@@ -40,6 +40,7 @@ class TurnOutput(BaseModel):
     caller_confirmed: bool = False      # caller said the read-back details are correct
     caller_wants_to_end: bool = False   # caller is saying goodbye or wants to hang up
     identity_confirmed: bool = False    # caller confirmed they are the known contact
+    asks_about_appointment: bool = False   # caller asks when THEIR appointment with the owner is
     reply: str                          # what the assistant says out loud next
 
 
@@ -76,13 +77,15 @@ What you need for the message: the caller's NAME and the REASON for the call.
 
 Each turn you get a STATUS note with what's known and what's missing. Use it, but in your own words.
 
-Every reply is JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, reply.
+Every reply is JSON with these keys: name, reason, urgency, callback, caller_confirmed, caller_wants_to_end, identity_confirmed, asks_about_appointment, reply.
 - Only fill a detail the caller gave in their LATEST message. Use null for everything else,
   including details you already know (our system remembers them).
 - Never guess. "Mhm", "yeah" or "uh huh" on their own are not answers.
 - "reason": a short phrase like "the roof repair quote", not "calling about the roof repair".
 - caller_confirmed: true only when the caller has just agreed that the details read back to them are right.
 - caller_wants_to_end: true when the caller says goodbye or clearly wants to hang up.
+- asks_about_appointment: true when the caller asks when their own appointment or meeting with
+  {settings.owner_name} is. You never know appointment times yourself, so never guess one.
 - If the caller corrects something, fill in the corrected value.
 - "reply" is what you say out loud next.
 
@@ -155,8 +158,18 @@ class Conversation:
         caller_context: str = "",
         known_name: str | None = None,
         shareable_notes: list[tuple[int, str]] | None = None,
+        availability: str | None = None,
+        appointment_text: str | None = None,
     ):
         system_prompt = SYSTEM_PROMPT + caller_context
+        # Calendar: the model only ever gets WHEN the owner is busy, as a
+        # finished sentence. It never sees what the busy time is for.
+        if availability:
+            system_prompt += (
+                f"\nAVAILABILITY (from the calendar, fine to tell any caller): {availability}\n"
+                f"Never say or guess what {settings.owner_name} is doing, where he is, or why. "
+                "Just say he's busy.\n"
+            )
         if known_name:
             system_prompt += (
                 f"\nSet identity_confirmed to true only when the caller clearly confirms "
@@ -197,8 +210,12 @@ class Conversation:
         self._shareable_notes = shareable_notes or []
         self.identity_confirmed = False
         self.identity_denied = False   # caller said they're someone else: permanent for this call
-        self._honesty_prefix = ""      # set when the caller asks if they're talking to a person
+        self._prefixes: list[tuple[str, str]] = []   # facts code says first (see reply)
+        self._reconfirm_next = False   # read the details back again next turn (see reply)
         self.wants_transfer = False    # urgent + confirmed: main.py dials the owner
+        self.availability = availability          # e.g. "Simrat is busy until 3 PM." or None (free)
+        self._appointment_text = appointment_text  # spoken by code, never shown to the model
+        self._appointment_answered = False
         self.delivered_note_ids: list[int] = []
 
     def _status_note(self) -> str:
@@ -222,8 +239,15 @@ class Conversation:
         self.messages.append({"role": "user", "content": caller_text})
         self.transcript.append(("caller", caller_text))
         self._caller_turns += 1
-        asked_if_ai = "?" in caller_text and AI_QUESTION.search(caller_text)
-        self._honesty_prefix = HONESTY_LINE if asked_if_ai else ""
+        # Facts code adds in front of whatever is said next, so they're said
+        # even when code replaces the model's reply (read-back, notes, goodbye).
+        # Each: (text to add, skip it if the reply already contains this).
+        self._prefixes = []
+        if "?" in caller_text and AI_QUESTION.search(caller_text):
+            self._prefixes.append((HONESTY_LINE, "AI"))
+        if self.availability and WHEN_FREE.search(caller_text):
+            busy_time = self.availability.split(" until ")[-1].rstrip(".")   # "3 PM"
+            self._prefixes.append((self.availability + " ", busy_time))
 
         turn = await self._ask_model()
         if turn is None:
@@ -246,11 +270,26 @@ class Conversation:
         answering_read_back = bool(self._last_read_back) and last_nova_line.endswith(self._last_read_back)
         disagreed = bool(DISAGREEMENT.search(caller_text)) or (
             bool(LEADING_NO.search(caller_text)) and (answering_read_back or not self._read_back_done))
+        # A correction after the read-back that the model missed: try code first.
+        if (self._read_back_done and self.details == self._read_back_snapshot
+                and CORRECTION_CUE.search(caller_text)):
+            fixed = code_correction(caller_text, self.details)
+            if fixed:
+                field, value = fixed
+                print(f"  code caught a correction the model missed: {field} -> {value!r}")
+                setattr(self.details, field, value)
+
         matches_read_back = self._read_back_done and self.details == self._read_back_snapshot
+        # Set last turn when the caller answered the read-back with something
+        # other than a clean yes ("Yeah, but can you book it?"): we answered
+        # them, and now the read-back must be heard again before it counts.
+        reconfirm_now, self._reconfirm_next = self._reconfirm_next, False
         # "Yes" to the read-back = the details are confirmed (completed), even
         # if they tack on a question. "Yeah, but..." is not a yes.
-        if (matches_read_back and turn.caller_confirmed and not disagreed
-                and not YES_BUT.search(caller_text)):
+        # It must answer the read-back itself: a "yes" to something the model
+        # said in between ("so it's the quote then?") confirms nothing we stored.
+        if (matches_read_back and answering_read_back and turn.caller_confirmed
+                and not disagreed and not YES_BUT.search(caller_text)):
             self.completed = True
 
         # Identity is a safety decision, so code makes it, not the model alone.
@@ -280,6 +319,12 @@ class Conversation:
             # Urgent: instead of goodbye, try to put them through (main.py
             # does the transfer once this line has been heard).
             if settings.transfer_enabled and self.details.urgency == "urgent":
+                if self.availability:
+                    # Calendar says busy: don't ring him, but make sure he sees it first
+                    return self._said(
+                        f"{self.availability} I've marked your message as urgent, "
+                        f"so it's the first thing he'll see. Take care, {first_name}."
+                    ), True
                 self.wants_transfer = True
                 return self._said(
                     f"Since it's urgent, let me try to put you through to {settings.owner_name}. "
@@ -295,22 +340,61 @@ class Conversation:
         #     missed the correction. Ask plainly instead of carrying on.
         if self._read_back_done and disagreed and self.details == self._read_back_snapshot:
             self.completed = False   # an earlier "yes" no longer stands
-            # "No, I need his cell number. Can you help?" pushes back on
-            # something else, not the details: let the model answer that.
-            if "?" in caller_text:
-                return self._said(turn.reply), False
-            return self._said(random.choice([
-                "Sorry about that. What should I change?",
-                "Oh, sorry. What did I get wrong?",
-            ])), False
+            # Second chance: ask the model again, telling it plainly that this
+            # is a correction. ("Actually, it's the quote, not the invoice"
+            # was once answered with "so it's the quote" while we still had
+            # "invoice" stored, and the caller then confirmed the wrong thing.)
+            retry = await self._ask_model(
+                "The caller is correcting the details that were read back. "
+                "Fill in the corrected value(s) from their latest message.")
+            if retry:
+                self._merge(retry)
+            if self.details != self._read_back_snapshot:
+                turn = retry   # fixed: step 4 reads the corrected details back
+            elif "?" in caller_text and not CORRECTION_CUE.search(caller_text):
+                # "No, I need his cell number. Can you help?" pushes back on
+                # something else, not the details: let the model answer that.
+                # The read-back must be heard again before anything counts.
+                self._read_back_snapshot = None
+                return self._said((retry or turn).reply), False
+            else:
+                return self._said(random.choice([
+                    "Sorry about that. What should I change?",
+                    "Oh, sorry. What did I get wrong?",
+                ])), False
+
+        # 1c. "When is my appointment?" Answered by code, never by the model.
+        #     Only a caller whose identity code confirmed hears a time.
+        # The model sometimes flags "That's all, thanks" as asking again;
+        # after one answer, only a real question gets it repeated.
+        asked_again_for_real = "?" in caller_text or not self._appointment_answered
+        if turn.asks_about_appointment and asked_again_for_real:
+            if not self.details.reason:
+                self.details.reason = "asked about their appointment"   # for your SMS
+            if self.identity_confirmed and self._appointment_text:
+                answer = self._appointment_text
+                self._appointment_answered = True
+            elif self.identity_confirmed and (self.delivered_note_ids or self._has_pending_notes()):
+                answer = ""   # the note they're about to hear is the answer
+            elif self.identity_confirmed:
+                answer = f"I don't see anything booked for you right now. I'll let {settings.owner_name} know you asked."
+            else:
+                answer = (f"I'm not able to share appointment details over the phone, "
+                          f"but I'll let {settings.owner_name} know you asked.")
+            return self._said(
+                (self._pending_notes_text() + answer).strip() + " Is there anything else you'd like me to pass on?"
+            ), False
 
         # 2. Caller wants to go, or the call has gone on too long: wrap up
         #    politely with whatever we have. Exception: everything is known
         #    but was never read back ("...no rush. Thanks!"). One quick
         #    read-back is worth it, so fall through to step 4.
         wants_out = turn.caller_wants_to_end or self._caller_turns >= MAX_CALLER_TURNS
+        # ...unless we just gave them what they called for (a note, their
+        # appointment time): then "that's all, thanks" really means goodbye.
+        got_their_answer = bool(self.delivered_note_ids) or self._appointment_answered
         quick_read_back = (not self.details.missing(self._required) and not self._read_back_done
-                           and self._caller_turns < MAX_CALLER_TURNS)
+                           and self._caller_turns < MAX_CALLER_TURNS and not got_their_answer)
         if wants_out and not quick_read_back:
             if self.details.reason:
                 self._fill_defaults()   # so the SMS still has a callback number
@@ -333,7 +417,8 @@ class Conversation:
         #    writes the read-back itself, so it always contains every detail.
         if not self.details.missing(self._required):
             self._fill_defaults()
-        if not self.details.missing(self._required) and self.details != self._read_back_snapshot:
+        if not self.details.missing(self._required) and (
+                self.details != self._read_back_snapshot or (reconfirm_now and not self.completed)):
             self._read_back_done = True
             self.completed = False   # new details: they need confirming again
             self._corrections_allowed = True
@@ -341,7 +426,13 @@ class Conversation:
             self._last_read_back = self._read_back_text()
             return self._said(self._last_read_back), False
 
+        if answering_read_back and not self.completed:
+            self._reconfirm_next = True
         return self._said(turn.reply), False
+
+    def _has_pending_notes(self) -> bool:
+        return self.identity_confirmed and any(
+            i not in self.delivered_note_ids for i, _ in self._shareable_notes)
 
     def _pending_notes_text(self) -> str:
         """Shareable notes not yet delivered, as one spoken sentence (or "").
@@ -355,12 +446,13 @@ class Conversation:
         notes = " ".join(_as_sentence(t) for _, t in pending)
         return f"{settings.owner_name} asked me to pass on a message: {notes} "
 
-    async def _ask_model(self) -> TurnOutput | None:
+    async def _ask_model(self, extra_note: str = "") -> TurnOutput | None:
         """One model call with the current history. None if the output was unusable."""
         # The status note is added for this request only, never stored in
         # history, so the model always sees the CURRENT status, not old ones.
+        status = self._status_note() + (" " + extra_note if extra_note else "")
         response = await chat(
-            messages=self.messages + [{"role": "system", "content": self._status_note()}],
+            messages=self.messages + [{"role": "system", "content": status}],
             # Structured output: Ollama forces the reply to match this JSON schema
             format=TurnOutput.model_json_schema(),
             options={
@@ -394,7 +486,15 @@ class Conversation:
             print(f"  identity DENIED: caller is not {self.known_name}. History removed from prompt.")
             return
 
-        if turn.identity_confirmed and not disagreed:
+        # The model sometimes misses a confirmation buried in a longer
+        # sentence ("Yes, this is Sara. What time is my appointment?").
+        # So code also accepts a plain yes to the greeting's question, or the
+        # caller naming themselves as the contact.
+        said_yes = self._caller_turns == 1 and bool(YES_START.search(self.transcript[-1][1]))
+        named_self = bool(re.search(
+            rf"\b(this is|it's|it is|i'm|i am)\s+{re.escape(known_first)}\b",
+            self.transcript[-1][1], re.IGNORECASE))
+        if (turn.identity_confirmed or said_yes or named_self) and not disagreed:
             self.identity_confirmed = True
             if not self.details.name:
                 self.details.name = self.known_name   # they just confirmed it
@@ -426,9 +526,10 @@ class Conversation:
 
     def _said(self, text: str) -> str:
         """Record what the assistant is about to say, and pass it through."""
-        if self._honesty_prefix and not re.search(r"\bAI\b", text):
-            text = self._honesty_prefix + text
-        self._honesty_prefix = ""
+        for prefix, skip_if in reversed(self._prefixes):
+            if skip_if not in text:
+                text = prefix + text
+        self._prefixes = []
         self.transcript.append(("assistant", text))
         self.messages.append({"role": "assistant", "content": text})
         return text
@@ -485,6 +586,52 @@ AI_QUESTION = re.compile(
 )
 HONESTY_LINE = "No, I'm an AI assistant, not a person. "
 
+# A plain yes at the start of a sentence: "Yes", "Yeah it's me", "Speaking"
+YES_START = re.compile(r"^\W*(yes|yeah|yep|yup|speaking|that's me|it's me|correct)\b", re.IGNORECASE)
+
+# "It's the quote, not the invoice": a correction, even with a "?" on the end.
+# If we failed to pick up the new value, never let the model's reply pretend
+# we did ("Got it, the quote" while "invoice" is still stored).
+CORRECTION_CUE = re.compile(r"\bnot (the|a|an|my|that|about)\b|\binstead\b|\bit's (actually|about)\b|\bchange it\b", re.IGNORECASE)
+
+# Code reads the most common correction phrasings itself, because the model
+# often misses them (eval: "it's the quote, not the invoice" left "invoice"
+# stored, three runs out of five).
+_NEW = r"(?P<new>[\w' -]{2,40}?)"
+_OLD = r"(?P<old>[\w' -]{2,40})"
+CORRECTION_PATTERNS = [
+    re.compile(r"\b(?:it's|it is|its)\s+(?:actually\s+)?(?:about\s+|regarding\s+)?" + _NEW + r",?\s+not\s+(?:about\s+)?" + _OLD, re.IGNORECASE),
+    re.compile(_NEW + r"\s+instead of\s+" + _OLD, re.IGNORECASE),
+]
+_LEAD_IN = re.compile(r"^.*\b(?:to|is|about|actually|it's|its)\s+", re.IGNORECASE)
+_ARTICLE = re.compile(r"^(?:the|a|an|my)\s+", re.IGNORECASE)
+
+
+def code_correction(text: str, details: "CallDetails") -> tuple[str, str] | None:
+    """'it's the quote, not the invoice' with reason 'the invoice'
+    -> ('reason', 'the quote'). None if nothing matches a stored detail."""
+    for pattern in CORRECTION_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        new = _ARTICLE.sub("", _LEAD_IN.sub("", match["new"].strip())).strip()
+        old = _ARTICLE.sub("", match["old"].strip()).split("  ")[0].strip()
+        if not new or not old:
+            continue
+        for field in ("reason", "name"):
+            current = getattr(details, field) or ""
+            if re.search(rf"\b{re.escape(old)}\b", current, re.IGNORECASE):
+                return field, re.sub(rf"\b{re.escape(old)}\b", new, current, flags=re.IGNORECASE)
+    return None
+
+
+# "When will he be free?", "Is he around?" -> the calendar answers that
+WHEN_FREE = re.compile(
+    r"\b(when|what time)\b.{0,40}\b(free|available|back|around|done|finish|reach|call)"
+    r"|\b(is he|is " + re.escape(settings.owner_name) + r")\s+(free|available|around|busy|in)\b",
+    re.IGNORECASE,
+)
+
 # "Yeah, but can you...?" is not a clean yes. Neither is a yes with a question.
 YES_BUT = re.compile(r"^\W*(yes|yeah|yep|sure|okay|ok|right)\b\W*but\b", re.IGNORECASE)
 
@@ -531,6 +678,10 @@ def _normalize_phone(value: str) -> str:
         return "+1" + digits
     if len(digits) == 11 and digits.startswith("1"):
         return "+" + digits
+    if len(digits) == 8 and digits.startswith("1"):
+        digits = digits[1:]                   # the model turned "555-1234" into "+15551234"
+    if len(digits) == 7:
+        return f"{digits[:3]}-{digits[3:]}"   # no area code: keep it as said, never "+1555..."
     return value
 
 

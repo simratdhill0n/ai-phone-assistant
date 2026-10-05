@@ -53,6 +53,10 @@ class Settings(BaseSettings):
 
     transfer_enabled: bool = True
     transfer_ring_seconds: int = 20
+    
+    google_calendar_id: str = ""        # your Gmail (main calendar, free/busy only)
+    google_nova_calendar_id: str = ""   # the Nova calendar's ID
+    google_credentials_path: str = ""
 
 
 settings = Settings()

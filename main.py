@@ -11,6 +11,7 @@ from html import escape
 
 from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
+from calender_check import call_facts
 from call_recorder import CallRecorder
 from config import settings
 from db import get_notes, init_db, mark_notes_delivered, save_call, utcnow
@@ -241,10 +242,11 @@ async def media_stream(websocket: WebSocket):
                              if n.visibility == "shareable" and n.delivered_at is None]
                 private_notes = [n.text for n in notes if n.visibility == "private"]
 
-                conversation = Conversation(
-                    greeting, caller_number, caller_context, known_name, shareable
+                # Ask the calendar in the background while the greeting plays:
+                # the greeting is fixed text, so it doesn't have to wait.
+                calendar_task = asyncio.create_task(
+                    asyncio.to_thread(call_facts, caller_number, bool(known_name))
                 )
-                note_texts = {n.id: n.text for n in notes}
 
                 # Names Whisper should expect on this call
                 hint_names = [settings.owner_name, settings.assistant_name]
@@ -259,6 +261,18 @@ async def media_stream(websocket: WebSocket):
                 # The greeting includes the AI and recording disclosure,
                 # so the caller can't talk over it.
                 start_speaking(greeting, can_interrupt=False)
+
+                # By the time the greeting has started, the calendar has
+                # usually answered. call_facts never raises: on any calendar
+                # problem it returns (None, None) and the call goes on without it.
+                availability, appointment_text = await calendar_task
+                if availability:
+                    print(f"Calendar: {availability}")
+                conversation = Conversation(
+                    greeting, caller_number, caller_context, known_name, shareable,
+                    availability=availability, appointment_text=appointment_text,
+                )
+                note_texts = {n.id: n.text for n in notes}
 
             elif event == "media":
                 payload = packet.get("media", {}).get("payload")

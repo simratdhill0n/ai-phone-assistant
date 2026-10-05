@@ -99,6 +99,8 @@ async def run_scenario(s: Scenario, verbose: bool) -> dict:
         build_caller_context(s),
         s.known_name,
         [(i, text) for i, text in enumerate(s.shareable_notes)],
+        availability=s.availability,
+        appointment_text=s.appointment_text,
     )
     history = [("assistant", greeting)]
     llm_times = []
@@ -171,6 +173,9 @@ def score(s: Scenario, conversation: Conversation, history: list[tuple[str, str]
     check("completed", conversation.completed == s.expect_completed,
           f"expected {s.expect_completed}, got {conversation.completed}")
 
+    if s.expect_transfer is not None:
+        check("transfer", conversation.wants_transfer == s.expect_transfer,
+              f"expected {s.expect_transfer}, got {conversation.wants_transfer}")
     if s.min_caller_turns:
         turns = sum(1 for speaker, _ in history if speaker == "caller")
         check("scenario played out", turns >= s.min_caller_turns,
