@@ -1,0 +1,9 @@
+# Just what the tests import: no torch, no Whisper, no GPU.
+# CI installs only this, so a test run takes seconds.
+pydantic
+pydantic-settings
+ollama
+httpx
+google-auth
+tzdata
+pytest

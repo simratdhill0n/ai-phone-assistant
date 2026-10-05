@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_env: Literal["dev", "prod"] = APP_ENV
+    app_env: Literal["dev", "prod", "test"] = APP_ENV
 
     # Server
     public_host: str
